@@ -42,6 +42,16 @@ export const busTexture = 'images/Vehicles_BusWhite_Idle'
 export const enemyActions = {
   Walk: action('Walk', ['Walk01', 'Walk02', 'Walk03', 'Walk04', 'Walk05', 'Walk06', 'Walk07', 'Walk08'], true, 10, 'Enemy'),
   Idle: action('Idle', ['Idle01', 'Idle02', 'Idle03', 'Idle04', 'Idle05', 'Idle06', 'Idle07'], true, 10, 'Enemy'),
+  PowerUp: action('PowerUp', [
+    'PowerUp01', 'PowerUp02', 'PowerUp03', 'PowerUp04', 'PowerUp05', 'PowerUp06', 'PowerUp07',
+  ], true, 10, 'Enemy'),
+  Vanish: action('Vanish', [
+    'Vanish01', 'Vanish02', 'Vanish03', 'Vanish04', 'Vanish05', 'Vanish06', 'Vanish07',
+  ], false, 10, 'Enemy'),
+  Appear: action('Appear', [
+    'Appear01', 'Appear02', 'Appear03', 'Appear04', 'Appear05',
+    'Appear06', 'Appear07', 'Appear08', 'Appear09', 'Appear10',
+  ], false, 10, 'Enemy'),
   Attack: action('Attack', ['Attack01', 'Attack02', 'Attack03', 'Attack04', 'Attack05', 'Attack06'], false, 10, 'Enemy'),
   BlastCharge: action('BlastCharge', [
     'BlastCharge01', 'BlastCharge02', 'BlastCharge03', 'BlastCharge04', 'BlastCharge05', 'BlastCharge06',

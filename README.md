@@ -28,7 +28,7 @@ Click inside the game to fire once. Each shot finishes its animation before acce
 ## Defense encounter
 
 - The white bus is the spawn landmark. The player starts beside its front door.
-- Player: 100 HP; bus: 300 HP. Every 15 seconds, clustered waves spawn on both sides: five melee and three ranged enemies on the right, plus five melee and three ranged allies on the left. Melee and ranged roles are shuffled together inside the same compact formation. Adjacent slots are 28 pixels apart with up to 6 pixels of random jitter, keeping the complete group within roughly 210 pixels. Living units from earlier waves remain. Every combat unit has 60 HP and deals 10 damage to another unit. Red health labels identify enemy melee units, amber labels identify enemy ranged units, and gray labels identify allies.
+- Player: 100 HP; bus: 300 HP. Every 15 seconds, clustered waves spawn on both sides: five melee and three ranged enemies on the right, plus five melee and three ranged allies on the left. Melee and ranged roles are shuffled together inside the same compact formation. Adjacent slots are 28 pixels apart with up to 6 pixels of random jitter, keeping the complete group within roughly 210 pixels. The enemy spawn center only advances right: once allied units push beyond the original battle area, later enemy waves appear at least 900 pixels beyond the leading living ally instead of spawning inside the allied formation. Living units from earlier waves remain. Every combat unit has 60 HP and deals 10 damage to another unit. Red health labels identify enemy melee units, amber labels identify enemy ranged units, and gray labels identify allies.
 - Enemies walk left at 65 px/s, never jump or turn around, and use the ground lane beneath the raised platforms.
 - A left-facing melee enemy can strike a target within 58 px of its body, overlapping its horizontal strike band (16–50 px above its feet). Players behind it are ignored.
 - Target priority is ally, then player, then bus. If any allied unit is inside an enemy's forward attack area, the enemy chooses an ally even when the player is closer. Distance only decides which ally to select. If the current target leaves the valid area or moves behind the enemy, it immediately resumes walking left or selects another valid target.
@@ -49,10 +49,22 @@ Click inside the game to fire once. Each shot finishes its animation before acce
 - Enemy projectiles use all four `Enemy/Effects/Projectile` frames at 12 fps, loop, with a shared visible crop at (30, 54), 39 × 7 pixels. The sprite rotates along its velocity. They pass through elevated platforms; ground, player, or bus contact consumes them. A 3.5 s lifetime and world bounds also recycle them. Player bullets still collide with platforms.
 - Projectile damage uses the existing 10 player / 20 bus damage rules, including player knockback, OnHit feedback, blinking, and shared invulnerability. Projectiles cannot damage other enemies. Defeat/victory and R clear every enemy projectile.
 
+## Boss
+
+- One Boss waits at the end of the second 3,840-pixel section (x = 7,680). It is displayed at 4.8× scale, exactly three times the regular enemy scale, has 1,200 HP (20× a 60 HP minion), and loops all seven `Enemy/PowerUp` frames at 10 fps.
+- Before activation it patrols 180 pixels to either side of its starting point at 45 px/s. Once the player comes within 1,000 pixels, it permanently advances left at 52 px/s.
+- Within 1,200 pixels, the Boss continuously locks the closest living allied unit or player. A pulsing red ground circle follows the current closest target for three seconds, so the player can move closer than an ally to steal the lock.
+- When locking completes, the warning position freezes and ten red-tinted Avatar arrows spread outward from the Boss in a floating ring for 750 ms. Boss arrows use a 5.4× display scale (three times their previous 1.8× size) while retaining the original narrow hitbox. They then launch simultaneously toward the warning circle using half the normal ballistic flight time (2× speed). After the volley it waits four seconds before starting another lock.
+- At 50% HP or lower, volley count, arrow speed, and attack frequency are 2× their base values (20 arrows, 4× normal ballistic speed, half cooldown), while the arrows' outward floating distance becomes 1.5×. At 25% HP or lower, attack values become 3× (30 arrows, 6× normal ballistic speed, one-third cooldown) and floating distance becomes 2×. The three-second target warning remains unchanged for readability.
+- The first time its HP reaches zero, the Boss plays all seven `Enemy/Vanish` frames at 10 fps and disappears. A full-width red ground warning appears for 1.2 seconds, followed by five seconds of dense red arrow rain. Rain arrows damage the player, bus, allies, and normal enemies without faction checks; every point of actual damage dealt heals the Boss, capped at 1,200 HP. Elevated platforms stop the arrows, so actors directly beneath them are safe.
+- After the rain settles, an unhealed Boss stays defeated. If any health was absorbed, it returns with all ten `Enemy/Appear` frames at 10 fps and resumes combat. This last-stand rain triggers only once; a later zero-HP state uses `Vanish` and removes the Boss permanently.
+- Player bullets and allied attacks can damage the Boss. A camera-fixed Boss health bar begins to bounce down from above the screen 250 pixels before the player reaches its 1,200-pixel attack range, pushing the minimap down by 58 pixels. If the player retreats before entering attack range, the bar retracts and the minimap returns; after entering attack range once, the bar stays for the fight. Its minimap marker, hit flash, collision, and staged disappearance use the existing combat systems. Three extra platforms around the Boss arena provide rain shelters.
+
 ## Scene
 
-- A 3,840-pixel world, a 960 × 540 viewport, six parallax layers, and a following camera.
-- Continuous solid ground and one-way elevated platforms that can be crossed upward or dropped through with Down.
+- A 23,040-pixel world (six original-length sections), a 960 × 540 viewport, six parallax layers, and a following camera.
+- A fixed minimap sits in the lower portion of the top HUD and shows the complete world, six section markers, the current camera window, the bus, player, allied positions, enemy positions, the Boss, and the current enemy spawn line.
+- Continuous solid ground and repeating one-way elevated platform patterns across all six sections through the endpoint. Platforms can be crossed upward or dropped through with Down.
 - A defend-the-bus objective, health displays, result overlay, and immediate restart.
 - Movement speed: 270 px/s; jump speed: 600 px/s; gravity: 1,400 px/s².
 - `src/main.ts` owns the scene, layout, physics, controls, and HUD.
@@ -78,7 +90,7 @@ The character uses complete groups from `public/assets/sprites/Avatar/`:
 | Combat/GunFire | GunFire01–GunFire05 (5) | 20 fps, once per stationary/airborne shot |
 | Combat/GunRunFire | GunRunFire01–GunRunFire08 (8) | 20 fps, once per moving grounded shot |
 | Weapons/Bullet | Bullet01–Bullet02 (2) | 20 fps, loop while active |
-| Weapons/Arrow | Arrow01 (1) | Static ballistic allied projectile |
+| Weapons/Arrow | Arrow01 (1) | Static ballistic projectile for allies and the Boss volley |
 
 Playback speeds are adjustable prototype assumptions, not source timing metadata. Jump states use the dedicated single-frame source actions. All selected source frames are 96 × 84; collision bodies exclude transparent padding. Bullet texture frames use the shared visible bounds (x=43, y=44, width=9, height=2) of both source images. No terrain tiles were found, so ground, platforms, and markers use Phaser primitives.
 
@@ -90,6 +102,9 @@ Enemy groups come from `public/assets/sprites/Enemy/`, all 96 × 84:
 | --- | --- | --- |
 | Walk | Walk01–Walk08 (8) | 10 fps, loop |
 | Idle | Idle01–Idle07 (7) | 10 fps, loop while waiting for cooldown |
+| PowerUp | PowerUp01–PowerUp07 (7) | 10 fps, loop while the Boss is alive |
+| Vanish | Vanish01–Vanish07 (7) | 10 fps, once when the Boss reaches zero HP |
+| Appear | Appear01–Appear10 (10) | 10 fps, once when absorbed health revives the Boss |
 | Attack | Attack01–Attack06 (6) | 10 fps, once; may cancel when the target leaves reach |
 | BlastCharge | BlastCharge01–BlastCharge06 (6) | 10 fps, once before a ranged shot |
 | BlastAttack | BlastAttack01–BlastAttack05 (5) | 10 fps, once on release |
