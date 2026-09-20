@@ -11,11 +11,11 @@ export const combatConfig = {
   playerKnockbackSpeed: 260, playerKnockbackLift: 180,
   rangedRange: 520, rangedVerticalRange: 300, rangedCooldown: 2200,
   projectileGravity: 650, projectileLifetime: 3500,
-  enemySpawns: [
-    { x: 820, kind: 'melee' }, { x: 1060, kind: 'ranged' },
-    { x: 1720, kind: 'melee' }, { x: 2240, kind: 'ranged' },
-    { x: 2840, kind: 'melee' }, { x: 3500, kind: 'ranged' },
-  ] satisfies { x: number; kind: EnemyKind }[],
+  waveInterval: 15000,
+  waveSpawns: {
+    melee: [2100, 2170, 2240, 2310, 2380],
+    ranged: [2450, 2520, 2590],
+  } satisfies Record<EnemyKind, number[]>,
 }
 
 export type Bounds = { left: number; right: number; top: number; bottom: number }

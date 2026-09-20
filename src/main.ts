@@ -10,6 +10,8 @@ const SPEED = 270
 const JUMP_SPEED = 600
 const COYOTE_MS = 100
 const JUMP_BUFFER_MS = 120
+const DROP_THROUGH_MS = 300
+const DROP_THROUGH_SPEED = 120
 const BULLET_SPEED = 760
 const BULLET_LIFETIME_MS = 1400
 const fontFamily = '"Segoe UI", "Microsoft JhengHei", sans-serif'
@@ -24,8 +26,12 @@ class PrototypeScene extends Phaser.Scene {
   private lastGrounded = -Infinity
   private jumpQueued = -Infinity
   private jumpReleased = false
+  private dropThroughUntil = 0
   private bus!: Phaser.GameObjects.Image
   private enemies: Enemy[] = []
+  private enemyGroup!: Phaser.Physics.Arcade.Group
+  private wave = 0
+  private nextWaveAt: number | null = null
   private playerHp = combatConfig.playerHealth
   private busHp = combatConfig.busHealth
   private playerBar!: HealthBar
@@ -59,8 +65,11 @@ class PrototypeScene extends Phaser.Scene {
     this.hurt = false
     this.hitStartedAt = 0
     this.jumpReleased = false
+    this.dropThroughUntil = 0
     this.gameEnded = false
     this.enemies = []
+    this.wave = 0
+    this.nextWaveAt = null
     this.physics.resume()
     this.firing = false
     registerAnimations(this)
@@ -70,10 +79,12 @@ class PrototypeScene extends Phaser.Scene {
       this.layers.push({ sprite, speed: background.speed })
     }
     this.physics.world.setBounds(0, 0, WORLD_WIDTH, 620)
-    const solids = this.physics.add.staticGroup()
-    const addPlatform = (x: number, top: number, width: number, height: number) => {
+    const groundSolids = this.physics.add.staticGroup()
+    const oneWayPlatforms = this.physics.add.staticGroup()
+    const addPlatform = (group: Phaser.Physics.Arcade.StaticGroup,
+      x: number, top: number, width: number, height: number) => {
       const surface = this.add.rectangle(x, top + height / 2, width, height, 0x151f31)
-      solids.add(surface)
+      group.add(surface)
       this.add.rectangle(x, top + 2, width, 4, 0x88d6ce)
       this.add.rectangle(x, top + 8, width, 8, 0x35455d)
       // No terrain tiles are present; the platform structure is drawn in code.
@@ -88,43 +99,47 @@ class PrototypeScene extends Phaser.Scene {
       }
       return surface
     }
-    const ground = addPlatform(WORLD_WIDTH / 2, GROUND_Y, WORLD_WIDTH, 150)
+    const ground = addPlatform(groundSolids, WORLD_WIDTH / 2, GROUND_Y, WORLD_WIDTH, 150)
     for (const [x, y, width] of [
       [590, 394, 180], [855, 314, 150], [1110, 394, 180],
       [1640, 390, 200], [1900, 310, 150], [2160, 250, 180],
       [2450, 330, 200], [2900, 394, 180], [3180, 314, 180],
-    ]) addPlatform(x, y - 30, width, 28)
+    ]) addPlatform(oneWayPlatforms, x, y - 30, width, 28)
     this.createLandmarks()
     this.player = this.physics.add.sprite(START_X, GROUND_Y, avatarActions.Idle.frames[0])
       .setOrigin(0.5, 1).setScale(1.6).setDepth(5).setCollideWorldBounds(true)
     // Inspected frames are 96 x 84 with transparent padding above the character.
     this.player.setSize(16, 38).setOffset(40, 46)
     this.player.setMaxVelocity(SPEED, 900)
-    this.physics.add.collider(this.player, solids)
+    this.physics.add.collider(this.player, groundSolids)
+    this.physics.add.collider(this.player, oneWayPlatforms, undefined, (_player, platform) => {
+      if (this.time.now < this.dropThroughUntil) return false
+      const playerBody = this.player.body as Phaser.Physics.Arcade.Body
+      const platformBody = (platform as Phaser.GameObjects.Rectangle).body as Phaser.Physics.Arcade.StaticBody
+      const previousBottom = playerBody.prev.y + playerBody.height
+      return playerBody.velocity.y >= 0 && previousBottom <= platformBody.top + 4
+    })
     this.bus = this.add.image(180, GROUND_Y, busTexture, 'vehicle').setOrigin(0.5, 1).setScale(2).setDepth(2)
     this.physics.add.existing(this.bus, true)
     this.playerBar = new HealthBar(this, 54, combatConfig.playerHealth, '玩家', 0xa0e6da)
     this.busBar = new HealthBar(this, 180, combatConfig.busHealth, '守護巴士', 0x7cb7ff)
-    const enemyGroup = this.physics.add.group()
-    for (const { x, kind } of combatConfig.enemySpawns) {
-      const enemy = new Enemy(this, x, GROUND_Y, kind)
-      this.enemies.push(enemy)
-      enemyGroup.add(enemy.sprite)
-    }
+    this.enemyGroup = this.physics.add.group()
     // Enemies use the ground lane. Raised platforms leave headroom and are only
     // used by the player; enemies never jump, turn around, or pursue upward.
-    this.physics.add.collider(enemyGroup, ground)
+    this.physics.add.collider(this.enemyGroup, ground)
     // Body contact uses the same damage gate as melee, including contact from
     // behind. This does not change the enemy's forward-only attack targeting.
-    this.physics.add.overlap(this.player, enemyGroup, (_player, target) => {
+    this.physics.add.overlap(this.player, this.enemyGroup, (_player, target) => {
       const enemy = (target as Phaser.Physics.Arcade.Sprite).getData('enemy') as Enemy
       if (enemy.hp > 0) this.takeDamage('player', enemy.sprite.x)
     })
     this.bullets = this.physics.add.group({ allowGravity: false, maxSize: 24 })
-    this.physics.add.overlap(this.bullets, solids, projectile => {
+    const recyclePlayerBullet: Phaser.Types.Physics.Arcade.ArcadePhysicsCallback = projectile => {
       this.recycleBullet(projectile as Phaser.Physics.Arcade.Sprite)
-    })
-    this.physics.add.overlap(this.bullets, enemyGroup, (projectile, target) => {
+    }
+    this.physics.add.overlap(this.bullets, groundSolids, recyclePlayerBullet)
+    this.physics.add.overlap(this.bullets, oneWayPlatforms, recyclePlayerBullet)
+    this.physics.add.overlap(this.bullets, this.enemyGroup, (projectile, target) => {
       const bullet = projectile as Phaser.Physics.Arcade.Sprite
       const enemy = (target as Phaser.Physics.Arcade.Sprite).getData('enemy') as Enemy
       if (!bullet.active || enemy.hp <= 0 || this.gameEnded) return
@@ -170,6 +185,7 @@ class PrototypeScene extends Phaser.Scene {
     camera.startFollow(this.player, true, 0.09, 1)
     camera.setDeadzone(140, 540)
     this.createHud()
+    this.spawnWave()
   }
 
   private createLandmarks(): void {
@@ -197,13 +213,30 @@ class PrototypeScene extends Phaser.Scene {
     hud.add(this.healthText)
     hud.add(text(925, 48, '紅色近戰 · 金色遠攻 · 留意蓄力與拋物線', 11, '#8ca3bc').setOrigin(1, 0))
     hud.add(this.add.rectangle(480, 521, 960, 38, 0x090f20, 0.95))
-    hud.add(text(24, 511, 'A D / ← → 移動    SPACE / W / ↑ 跳躍    滑鼠左鍵 射擊    R 重來', 12, '#b0c2d6'))
+    hud.add(text(24, 511, 'A D / ← → 移動    SPACE / W / ↑ 跳躍    ↓ 下落    滑鼠左鍵 射擊    R 重來', 12, '#b0c2d6'))
     this.stateText = text(935, 511, '守住巴士', 12, '#a0e6da').setOrigin(1, 0)
     hud.add(this.stateText)
   }
 
   private playAction(action: keyof typeof avatarActions): void {
     this.player.play(avatarActions[action].key, true)
+  }
+
+  private spawnWave(): void {
+    this.enemies = this.enemies.filter(enemy => enemy.sprite.active)
+    this.wave += 1
+    this.nextWaveAt = this.time.now + combatConfig.waveInterval
+    for (const [kind, spawnXs] of [
+      ['melee', combatConfig.waveSpawns.melee],
+      ['ranged', combatConfig.waveSpawns.ranged],
+    ] as const) {
+      for (const x of spawnXs) {
+        const enemy = new Enemy(this, x, GROUND_Y, kind)
+        this.enemies.push(enemy)
+        this.enemyGroup.add(enemy.sprite)
+      }
+    }
+    this.stateText.setText(`第 ${this.wave} 波來襲 · 下一波 ${combatConfig.waveInterval / 1000} 秒`)
   }
 
   private onPointerDown(pointer: Phaser.Input.Pointer): void {
@@ -336,7 +369,7 @@ class PrototypeScene extends Phaser.Scene {
       return
     }
     const body = this.player.body as Phaser.Physics.Arcade.Body
-    const grounded = body.blocked.down || body.touching.down
+    let grounded = body.blocked.down || body.touching.down
     if (grounded && !this.hurt) this.lastGrounded = time
     const left = this.cursors.left.isDown || this.keys.A.isDown
     const right = this.cursors.right.isDown || this.keys.D.isDown
@@ -344,6 +377,14 @@ class PrototypeScene extends Phaser.Scene {
     if (!this.hurt) {
       this.player.setVelocityX(direction * SPEED)
       if (direction) this.player.setFlipX(direction < 0)
+    }
+    if (!this.hurt && grounded && this.player.y < GROUND_Y - 8
+      && Phaser.Input.Keyboard.JustDown(this.cursors.down)) {
+      this.dropThroughUntil = time + DROP_THROUGH_MS
+      this.player.y += 4
+      this.player.setVelocityY(DROP_THROUGH_SPEED)
+      this.lastGrounded = -Infinity
+      grounded = false
     }
     // Read every edge, including simultaneous keys, to avoid stale jump requests.
     const jumpEdges = [this.cursors.space, this.cursors.up, this.keys.W]
@@ -390,7 +431,12 @@ class PrototypeScene extends Phaser.Scene {
         (attacker, target) => this.launchEnemyProjectile(attacker, target))
       if (this.gameEnded) break
     }
-    if (this.enemies.every(enemy => enemy.hp <= 0)) this.endEncounter('防守成功！巴士安全了')
+    this.enemies = this.enemies.filter(enemy => enemy.hp > 0 || enemy.sprite.active)
+    if (this.nextWaveAt !== null) {
+      if (time >= this.nextWaveAt) this.spawnWave()
+      const seconds = Math.max(0, Math.ceil((this.nextWaveAt - time) / 1000))
+      this.stateText.setText(`第 ${this.wave} 波 · 下一波 ${seconds} 秒`)
+    }
     this.updateHealthDisplay()
   }
 }

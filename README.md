@@ -17,17 +17,18 @@ Open the URL printed by Vite. `npm run build` checks TypeScript and creates a pr
 | --- | --- |
 | Move | A / D or Left / Right |
 | Jump | Space, W, or Up |
+| Drop through a raised platform | Down |
 | Fire | Left mouse click; shoots in the facing direction |
 | Restart encounter (restore all health and enemies) | R |
 
-Hold jump for a higher jump; release early for a shorter hop. Jumping requires ground contact, with 100 ms of coyote time and a 120 ms input buffer. Holding jump does not automatically jump again on landing.
+Hold jump for a higher jump; release early for a shorter hop. Jumping requires ground contact, with 100 ms of coyote time and a 120 ms input buffer. Holding jump does not automatically jump again on landing. Raised platforms are one-way: jump upward through them, land from above, and press Down while standing on one to drop through it.
 
 Click inside the game to fire once. Each shot finishes its animation before accepting another click (250 ms standing/airborne, 400 ms running). Movement and jumping remain available during firing. Bullets travel horizontally at 760 px/s without gravity and are recycled on terrain contact, enemy contact, at the world edges, or after 1.4 seconds. Each bullet damages at most one enemy. R also clears bullets.
 
 ## Defense encounter
 
 - The white bus is the spawn landmark. The player starts beside its front door.
-- Player: 100 HP; bus: 300 HP; three melee and three ranged enemies: 60 HP each. Bullets deal 20 damage. Red health labels identify melee units; amber labels identify ranged units.
+- Player: 100 HP; bus: 300 HP. Every 15 seconds, a clustered wave of five melee and three ranged enemies spawns within a 490-pixel-wide area. Living enemies from earlier waves remain. Each enemy has 60 HP, and bullets deal 20 damage. Red health labels identify melee units; amber labels identify ranged units.
 - Enemies walk left at 65 px/s, never jump or turn around, and use the ground lane beneath the raised platforms.
 - A left-facing melee enemy can strike a target within 58 px of its body, overlapping its horizontal strike band (16–50 px above its feet). Players behind it are ignored.
 - A reachable player has priority over the bus. If the player jumps out of reach or moves behind the enemy, it immediately resumes walking left, or attacks the bus if already in reach.
@@ -36,7 +37,7 @@ Click inside the game to fire once. Each shot finishes its animation before acce
 - An accepted hit pushes the player away from the enemy at 260 px/s with a small 180 px/s upward impulse. Movement, jumping, and firing are locked during the complete 300 ms Knockback animation, then resume while immunity remains active. Shooting animations are interrupted cleanly by damage.
 - OnHit feedback uses a brief impact flash, a red initial flash, and opacity blinking every 100 ms during immunity. No source asset named OnHit exists. Death, victory, and R restore full opacity and clear the temporary damage state.
 - Player/bus health appears in the fixed HUD and above each actor; enemies have individual health bars. Enemies play their death animation and stop colliding at zero HP.
-- Player death or bus destruction ends the encounter. Defeating all six enemies wins. Press R to fully reset after either result or during play.
+- Player death or bus destruction ends the encounter. Waves arrive on the fixed timer even when enemies from earlier waves are still alive, and continue without a final victory state. The HUD shows the current wave and the next-wave countdown. Press R to fully reset health and return to wave one after defeat or during play.
 - Balance values and directional melee logic are in `src/combat.ts`.
 
 ## Ranged enemies
@@ -50,7 +51,7 @@ Click inside the game to fire once. Each shot finishes its animation before acce
 ## Scene
 
 - A 3,840-pixel world, a 960 × 540 viewport, six parallax layers, and a following camera.
-- Continuous ground and solid elevated platforms for testing jumps and collisions.
+- Continuous solid ground and one-way elevated platforms that can be crossed upward or dropped through with Down.
 - A defend-the-bus objective, health displays, result overlay, and immediate restart.
 - Movement speed: 270 px/s; jump speed: 600 px/s; gravity: 1,400 px/s².
 - `src/main.ts` owns the scene, layout, physics, controls, and HUD.
