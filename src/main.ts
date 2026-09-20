@@ -1,6 +1,6 @@
 import Phaser from 'phaser'
-import { avatarActions, backgrounds, bulletAction, busTexture, enemyProjectileAction, loadAssets, registerAnimations } from './assets'
-import { ballisticVelocity, combatConfig, Enemy, HealthBar, type Bounds } from './combat'
+import { allyArrowTexture, avatarActions, backgrounds, bulletAction, busTexture, enemyProjectileAction, loadAssets, registerAnimations } from './assets'
+import { AllyUnit, ballisticVelocity, combatConfig, Enemy, HealthBar, type Bounds, type EnemyTarget } from './combat'
 import './style.css'
 
 const WORLD_WIDTH = 3840
@@ -28,7 +28,9 @@ class PrototypeScene extends Phaser.Scene {
   private jumpReleased = false
   private dropThroughUntil = 0
   private bus!: Phaser.GameObjects.Image
+  private allies: AllyUnit[] = []
   private enemies: Enemy[] = []
+  private allyGroup!: Phaser.Physics.Arcade.Group
   private enemyGroup!: Phaser.Physics.Arcade.Group
   private wave = 0
   private nextWaveAt: number | null = null
@@ -41,6 +43,7 @@ class PrototypeScene extends Phaser.Scene {
   private hitStartedAt = 0
   private gameEnded = false
   private bullets!: Phaser.Physics.Arcade.Group
+  private allyProjectiles!: Phaser.Physics.Arcade.Group
   private enemyProjectiles!: Phaser.Physics.Arcade.Group
   private firing = false
 
@@ -67,6 +70,7 @@ class PrototypeScene extends Phaser.Scene {
     this.jumpReleased = false
     this.dropThroughUntil = 0
     this.gameEnded = false
+    this.allies = []
     this.enemies = []
     this.wave = 0
     this.nextWaveAt = null
@@ -123,9 +127,10 @@ class PrototypeScene extends Phaser.Scene {
     this.physics.add.existing(this.bus, true)
     this.playerBar = new HealthBar(this, 54, combatConfig.playerHealth, '玩家', 0xa0e6da)
     this.busBar = new HealthBar(this, 180, combatConfig.busHealth, '守護巴士', 0x7cb7ff)
+    this.allyGroup = this.physics.add.group()
     this.enemyGroup = this.physics.add.group()
-    // Enemies use the ground lane. Raised platforms leave headroom and are only
-    // used by the player; enemies never jump, turn around, or pursue upward.
+    // Both armies use the ground lane. Raised platforms remain player-only.
+    this.physics.add.collider(this.allyGroup, ground)
     this.physics.add.collider(this.enemyGroup, ground)
     // Body contact uses the same damage gate as melee, including contact from
     // behind. This does not change the enemy's forward-only attack targeting.
@@ -146,6 +151,17 @@ class PrototypeScene extends Phaser.Scene {
       this.recycleBullet(bullet)
       enemy.takeDamage(combatConfig.bulletDamage)
     })
+    this.allyProjectiles = this.physics.add.group({ allowGravity: true, maxSize: 64 })
+    this.physics.add.overlap(ground, this.allyProjectiles, (_ground, projectile) => {
+      this.recycleBullet(projectile as Phaser.Physics.Arcade.Sprite)
+    })
+    this.physics.add.overlap(this.enemyGroup, this.allyProjectiles, (target, projectile) => {
+      const shot = projectile as Phaser.Physics.Arcade.Sprite
+      const enemy = (target as Phaser.Physics.Arcade.Sprite).getData('enemy') as Enemy
+      if (!shot.active || enemy.hp <= 0 || this.gameEnded) return
+      this.recycleBullet(shot)
+      enemy.takeDamage(combatConfig.enemyDamage)
+    })
     this.enemyProjectiles = this.physics.add.group({ allowGravity: true, maxSize: 32 })
     // Sprite-vs-group callbacks return the single actor first. Put it first
     // explicitly, and recycle only the projectile in the second argument.
@@ -165,6 +181,13 @@ class PrototypeScene extends Phaser.Scene {
       if (!shot.active || this.gameEnded) return
       this.recycleBullet(shot)
       this.takeDamage('bus', shot.getData('sourceX') as number)
+    })
+    this.physics.add.overlap(this.allyGroup, this.enemyProjectiles, (target, projectile) => {
+      const shot = projectile as Phaser.Physics.Arcade.Sprite
+      const ally = (target as Phaser.Physics.Arcade.Sprite).getData('ally') as AllyUnit
+      if (!shot.active || ally.hp <= 0 || this.gameEnded) return
+      this.recycleBullet(shot)
+      ally.takeDamage(combatConfig.enemyDamage)
     })
     this.player.on(Phaser.Animations.Events.ANIMATION_COMPLETE, (animation: Phaser.Animations.Animation) => {
       if (animation.key === avatarActions.GunFire.key || animation.key === avatarActions.GunRunFire.key) {
@@ -211,7 +234,7 @@ class PrototypeScene extends Phaser.Scene {
     hud.add(text(42, 47, 'PROTOTYPE 01     ·     阻止敵人摧毀巴士', 11, '#8ca3bc'))
     this.healthText = text(925, 21, '', 15, '#a0e6da').setOrigin(1, 0)
     hud.add(this.healthText)
-    hud.add(text(925, 48, '紅色近戰 · 金色遠攻 · 留意蓄力與拋物線', 11, '#8ca3bc').setOrigin(1, 0))
+    hud.add(text(925, 48, '敵軍紅／金 · 友軍灰 · 雙方近戰與遠攻', 11, '#8ca3bc').setOrigin(1, 0))
     hud.add(this.add.rectangle(480, 521, 960, 38, 0x090f20, 0.95))
     hud.add(text(24, 511, 'A D / ← → 移動    SPACE / W / ↑ 跳躍    ↓ 下落    滑鼠左鍵 射擊    R 重來', 12, '#b0c2d6'))
     this.stateText = text(935, 511, '守住巴士', 12, '#a0e6da').setOrigin(1, 0)
@@ -224,6 +247,7 @@ class PrototypeScene extends Phaser.Scene {
 
   private spawnWave(): void {
     this.enemies = this.enemies.filter(enemy => enemy.sprite.active)
+    this.allies = this.allies.filter(ally => ally.sprite.active)
     this.wave += 1
     this.nextWaveAt = this.time.now + combatConfig.waveInterval
     for (const [kind, spawnXs] of [
@@ -234,6 +258,16 @@ class PrototypeScene extends Phaser.Scene {
         const enemy = new Enemy(this, x, GROUND_Y, kind)
         this.enemies.push(enemy)
         this.enemyGroup.add(enemy.sprite)
+      }
+    }
+    for (const [kind, spawnXs] of [
+      ['melee', combatConfig.allyWaveSpawns.melee],
+      ['ranged', combatConfig.allyWaveSpawns.ranged],
+    ] as const) {
+      for (const x of spawnXs) {
+        const ally = new AllyUnit(this, x, GROUND_Y, kind)
+        this.allies.push(ally)
+        this.allyGroup.add(ally.sprite)
       }
     }
     this.stateText.setText(`第 ${this.wave} 波來襲 · 下一波 ${combatConfig.waveInterval / 1000} 秒`)
@@ -249,9 +283,17 @@ class PrototypeScene extends Phaser.Scene {
     const direction = this.player.flipX ? -1 : 1
     const x = this.player.x + direction * 32
     const y = this.player.y - 40
+    if (!this.launchPlayerBullet(x, y, direction)) return
+    const body = this.player.body as Phaser.Physics.Arcade.Body
+    const running = (body.blocked.down || body.touching.down) && Math.abs(body.velocity.x) > 0
+    this.firing = true
+    this.playAction(running ? 'GunRunFire' : 'GunFire')
+  }
+
+  private launchPlayerBullet(x: number, y: number, direction: number): boolean {
     const bullet = this.bullets.get(x, y, bulletAction.frames[0], 'projectile') as
       Phaser.Physics.Arcade.Sprite | null
-    if (!bullet) return
+    if (!bullet) return false
     bullet.setTexture(bulletAction.frames[0], 'projectile')
       .setOrigin(0.5).setScale(2).setDepth(6).setFlipX(direction < 0)
     bullet.enableBody(true, x, y, true, true)
@@ -261,10 +303,7 @@ class PrototypeScene extends Phaser.Scene {
     bullet.setVelocity(direction * BULLET_SPEED, 0)
     bullet.setData('expiresAt', this.time.now + BULLET_LIFETIME_MS)
     bullet.play(bulletAction.key)
-    const body = this.player.body as Phaser.Physics.Arcade.Body
-    const running = (body.blocked.down || body.touching.down) && Math.abs(body.velocity.x) > 0
-    this.firing = true
-    this.playAction(running ? 'GunRunFire' : 'GunFire')
+    return true
   }
 
   private recycleBullet(bullet: Phaser.Physics.Arcade.Sprite): void {
@@ -289,6 +328,29 @@ class PrototypeScene extends Phaser.Scene {
     shot.setData('sourceX', enemy.sprite.x)
     shot.setData('expiresAt', this.time.now + combatConfig.projectileLifetime)
     shot.play(enemyProjectileAction.key)
+  }
+
+  private launchAllyProjectile(ally: AllyUnit, target: Bounds): void {
+    if (this.gameEnded || ally.hp <= 0) return
+    const x = ally.sprite.x + 42
+    const y = ally.sprite.y - 42
+    const shot = this.allyProjectiles.get(x, y, allyArrowTexture, 'projectile') as
+      Phaser.Physics.Arcade.Sprite | null
+    if (!shot) return
+    shot.setTexture(allyArrowTexture, 'projectile').setOrigin(0.5)
+      .setScale(1.4).setDepth(7).setFlipX(false).setAlpha(1)
+    shot.enableBody(true, x, y, true, true)
+    shot.setSize(23, 5).setOffset(0, 0)
+    const body = shot.body as Phaser.Physics.Arcade.Body
+    body.setAllowGravity(true).setGravityY(combatConfig.projectileGravity - this.physics.world.gravity.y)
+    const velocity = ballisticVelocity(x, y, (target.left + target.right) / 2, (target.top + target.bottom) / 2)
+    shot.setVelocity(velocity.x, velocity.y).setRotation(Math.atan2(velocity.y, velocity.x))
+    shot.setData('expiresAt', this.time.now + combatConfig.projectileLifetime)
+  }
+
+  private damageEnemyTarget(target: EnemyTarget, sourceX: number): void {
+    if (typeof target === 'string') this.takeDamage(target, sourceX)
+    else target.takeDamage(combatConfig.enemyDamage)
   }
 
   private takeDamage(target: 'player' | 'bus', sourceX: number): void {
@@ -332,8 +394,10 @@ class PrototypeScene extends Phaser.Scene {
     this.player.setAlpha(1).clearTint()
     this.physics.pause()
     this.player.setVelocity(0).stop()
+    for (const ally of this.allies) ally.stop()
     for (const enemy of this.enemies) if (enemy.hp > 0) enemy.sprite.setVelocity(0).stop()
     for (const bullet of this.bullets.getChildren()) this.recycleBullet(bullet as Phaser.Physics.Arcade.Sprite)
+    for (const arrow of this.allyProjectiles.getChildren()) this.recycleBullet(arrow as Phaser.Physics.Arcade.Sprite)
     for (const shot of this.enemyProjectiles.getChildren()) this.recycleBullet(shot as Phaser.Physics.Arcade.Sprite)
     if (this.playerHp === 0) this.player.setTint(0x8d5865)
     if (this.busHp === 0) this.bus.setTint(0x665466)
@@ -416,26 +480,37 @@ class PrototypeScene extends Phaser.Scene {
       }
     }
     for (const layer of this.layers) layer.sprite.tilePositionX = this.cameras.main.scrollX * layer.speed
-    for (const child of this.enemyProjectiles.getChildren()) {
-      const shot = child as Phaser.Physics.Arcade.Sprite
-      if (!shot.active) continue
-      if (time >= shot.getData('expiresAt') || shot.x < -60 || shot.x > WORLD_WIDTH + 60 || shot.y > 620 || shot.y < -600) {
-        this.recycleBullet(shot)
-      } else {
-        const velocity = (shot.body as Phaser.Physics.Arcade.Body).velocity
-        shot.setRotation(Math.atan2(velocity.y, velocity.x))
+    for (const projectileGroup of [this.enemyProjectiles, this.allyProjectiles]) {
+      for (const child of projectileGroup.getChildren()) {
+        const shot = child as Phaser.Physics.Arcade.Sprite
+        if (!shot.active) continue
+        if (time >= shot.getData('expiresAt') || shot.x < -60 || shot.x > WORLD_WIDTH + 60 || shot.y > 620 || shot.y < -600) {
+          this.recycleBullet(shot)
+        } else {
+          const velocity = (shot.body as Phaser.Physics.Arcade.Body).velocity
+          shot.setRotation(Math.atan2(velocity.y, velocity.x))
+        }
       }
     }
     for (const enemy of this.enemies) {
-      enemy.update(time, body, this.bus.getBounds(), target => this.takeDamage(target, enemy.sprite.x),
+      enemy.update(time, body, this.bus.getBounds(), this.allies,
+        target => this.damageEnemyTarget(target, enemy.sprite.x),
         (attacker, target) => this.launchEnemyProjectile(attacker, target))
       if (this.gameEnded) break
     }
+    if (!this.gameEnded) {
+      for (const ally of this.allies) {
+        ally.update(time, this.enemies, (attacker, target) => this.launchAllyProjectile(attacker, target))
+      }
+    }
     this.enemies = this.enemies.filter(enemy => enemy.hp > 0 || enemy.sprite.active)
+    this.allies = this.allies.filter(ally => ally.hp > 0 || ally.sprite.active)
     if (this.nextWaveAt !== null) {
       if (time >= this.nextWaveAt) this.spawnWave()
       const seconds = Math.max(0, Math.ceil((this.nextWaveAt - time) / 1000))
-      this.stateText.setText(`第 ${this.wave} 波 · 下一波 ${seconds} 秒`)
+      const allyMelee = this.allies.filter(ally => ally.hp > 0 && ally.kind === 'melee').length
+      const allyRanged = this.allies.filter(ally => ally.hp > 0 && ally.kind === 'ranged').length
+      this.stateText.setText(`第 ${this.wave} 波 · 友軍 ${allyMelee}/${allyRanged} · 下一波 ${seconds} 秒`)
     }
     this.updateHealthDisplay()
   }

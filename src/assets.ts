@@ -23,9 +23,18 @@ export const avatarActions = {
     'GunRunFire01', 'GunRunFire02', 'GunRunFire03', 'GunRunFire04',
     'GunRunFire05', 'GunRunFire06', 'GunRunFire07', 'GunRunFire08',
   ], false, 20),
+  SwordComboA: action('Combat/SwordComboA', [
+    'SwordCombo0101', 'SwordCombo0102', 'SwordCombo0103',
+    'SwordCombo0104', 'SwordCombo0105', 'SwordCombo0106',
+  ], false),
+  BowAim: action('Combat/BowAim', ['BowAim01', 'BowAim02', 'BowAim03', 'BowAim04'], false),
+  Die: action('Die', [
+    'Die01', 'Die02', 'Die03', 'Die04', 'Die05', 'Die06', 'Die07', 'Die08', 'Die09',
+  ], false),
 }
 
 export const bulletAction = action('Weapons/Bullet', ['Bullet01', 'Bullet02'], true, 20)
+export const allyArrowTexture = 'sprites/Avatar/Weapons/Arrow/Arrow01'
 export const enemyProjectileAction = action('Effects/Projectile', [
   'Projectile01', 'Projectile02', 'Projectile03', 'Projectile04',
 ], true, 12, 'Enemy')
@@ -54,7 +63,7 @@ export const backgrounds = [
 
 export function loadAssets(scene: Phaser.Scene): void {
   const base = import.meta.env.BASE_URL
-  const keys = [busTexture, ...backgrounds.map(layer => layer.key),
+  const keys = [busTexture, allyArrowTexture, ...backgrounds.map(layer => layer.key),
     ...Object.values(avatarActions).flatMap(a => a.frames),
     ...Object.values(enemyActions).flatMap(a => a.frames), ...bulletAction.frames, ...enemyProjectileAction.frames]
   for (const key of keys) {
@@ -86,6 +95,8 @@ export function registerAnimations(scene: Phaser.Scene): void {
       frameRate: bulletAction.frameRate, repeat: bulletAction.repeat,
     })
   }
+  const arrow = scene.textures.get(allyArrowTexture)
+  if (!arrow.has('projectile')) arrow.add('projectile', 0, 42, 42, 23, 5)
   // Shared visible bounds of all four enemy projectile frames (right-facing).
   for (const key of enemyProjectileAction.frames) {
     const texture = scene.textures.get(key)

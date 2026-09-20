@@ -28,7 +28,7 @@ Click inside the game to fire once. Each shot finishes its animation before acce
 ## Defense encounter
 
 - The white bus is the spawn landmark. The player starts beside its front door.
-- Player: 100 HP; bus: 300 HP. Every 15 seconds, a clustered wave of five melee and three ranged enemies spawns within a 490-pixel-wide area. Living enemies from earlier waves remain. Each enemy has 60 HP, and bullets deal 20 damage. Red health labels identify melee units; amber labels identify ranged units.
+- Player: 100 HP; bus: 300 HP. Every 15 seconds, clustered waves spawn on both sides: five melee and three ranged enemies on the right, plus five melee and three ranged allies on the left. Each group occupies a 490-pixel-wide area, and living units from earlier waves remain. Every combat unit has 60 HP and deals 10 damage to another unit. Red health labels identify enemy melee units, amber labels identify enemy ranged units, and gray labels identify allies.
 - Enemies walk left at 65 px/s, never jump or turn around, and use the ground lane beneath the raised platforms.
 - A left-facing melee enemy can strike a target within 58 px of its body, overlapping its horizontal strike band (16–50 px above its feet). Players behind it are ignored.
 - A reachable player has priority over the bus. If the player jumps out of reach or moves behind the enemy, it immediately resumes walking left, or attacks the bus if already in reach.
@@ -37,6 +37,7 @@ Click inside the game to fire once. Each shot finishes its animation before acce
 - An accepted hit pushes the player away from the enemy at 260 px/s with a small 180 px/s upward impulse. Movement, jumping, and firing are locked during the complete 300 ms Knockback animation, then resume while immunity remains active. Shooting animations are interrupted cleanly by damage.
 - OnHit feedback uses a brief impact flash, a red initial flash, and opacity blinking every 100 ms during immunity. No source asset named OnHit exists. Death, victory, and R restore full opacity and clear the temporary damage state.
 - Player/bus health appears in the fixed HUD and above each actor; enemies have individual health bars. Enemies play their death animation and stop colliding at zero HP.
+- Allies are gray-tinted copies of the player sprite and advance right at 65 px/s. Melee allies play the complete six-frame SwordComboA action when an enemy is in their forward strike band. Ranged allies stay behind the melee line, play all four BowAim frames, and then fire the Avatar arrow as a ballistic projectile. Enemies can target and damage allies; allies show individual health bars, play the complete nine-frame Die action at zero HP, and stop colliding after death.
 - Player death or bus destruction ends the encounter. Waves arrive on the fixed timer even when enemies from earlier waves are still alive, and continue without a final victory state. The HUD shows the current wave and the next-wave countdown. Press R to fully reset health and return to wave one after defeat or during play.
 - Balance values and directional melee logic are in `src/combat.ts`.
 
@@ -71,9 +72,13 @@ The character uses complete groups from `public/assets/sprites/Avatar/`:
 | JumpMid | JumpMid01 (1) | Once, held near apex |
 | JumpFall | JumpFall01 (1) | Once, held during descent |
 | Knockback | Knockback01–Knockback06 (6) | 20 fps, once on accepted damage |
+| Die | Die01–Die09 (9) | 10 fps, once on allied death |
+| Combat/SwordComboA | SwordCombo0101–SwordCombo0106 (6) | 10 fps, once per allied melee attack |
+| Combat/BowAim | BowAim01–BowAim04 (4) | 10 fps, once per allied ranged attack |
 | Combat/GunFire | GunFire01–GunFire05 (5) | 20 fps, once per stationary/airborne shot |
 | Combat/GunRunFire | GunRunFire01–GunRunFire08 (8) | 20 fps, once per moving grounded shot |
 | Weapons/Bullet | Bullet01–Bullet02 (2) | 20 fps, loop while active |
+| Weapons/Arrow | Arrow01 (1) | Static ballistic allied projectile |
 
 Playback speeds are adjustable prototype assumptions, not source timing metadata. Jump states use the dedicated single-frame source actions. All selected source frames are 96 × 84; collision bodies exclude transparent padding. Bullet texture frames use the shared visible bounds (x=43, y=44, width=9, height=2) of both source images. No terrain tiles were found, so ground, platforms, and markers use Phaser primitives.
 

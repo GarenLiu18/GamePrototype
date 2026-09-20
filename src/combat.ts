@@ -1,5 +1,5 @@
 import Phaser from 'phaser'
-import { enemyActions } from './assets'
+import { avatarActions, enemyActions } from './assets'
 
 export type EnemyKind = 'melee' | 'ranged'
 
@@ -16,6 +16,10 @@ export const combatConfig = {
     melee: [2100, 2170, 2240, 2310, 2380],
     ranged: [2450, 2520, 2590],
   } satisfies Record<EnemyKind, number[]>,
+  allyWaveSpawns: {
+    melee: [630, 700, 770, 840, 910],
+    ranged: [420, 490, 560],
+  } satisfies Record<EnemyKind, number[]>,
 }
 
 export type Bounds = { left: number; right: number; top: number; bottom: number }
@@ -23,6 +27,12 @@ export type Bounds = { left: number; right: number; top: number; bottom: number 
 export function canShootFromLeft(enemy: Bounds, target: Bounds): boolean {
   const dx = (enemy.left + enemy.right - target.left - target.right) / 2
   const dy = (enemy.top + enemy.bottom - target.top - target.bottom) / 2
+  return dx >= 48 && dx <= combatConfig.rangedRange && Math.abs(dy) <= combatConfig.rangedVerticalRange
+}
+
+export function canShootFromRight(ally: Bounds, target: Bounds): boolean {
+  const dx = (target.left + target.right - ally.left - ally.right) / 2
+  const dy = (target.top + target.bottom - ally.top - ally.bottom) / 2
   return dx >= 48 && dx <= combatConfig.rangedRange && Math.abs(dy) <= combatConfig.rangedVerticalRange
 }
 
@@ -42,6 +52,14 @@ export function canAttackFromLeft(enemy: Bounds, target: Bounds): boolean {
     && target.left <= enemy.left
     && target.bottom > enemy.bottom - 50
     && target.top < enemy.bottom - 16
+}
+
+export function canAttackFromRight(ally: Bounds, target: Bounds): boolean {
+  return (target.left + target.right) / 2 >= (ally.left + ally.right) / 2
+    && target.left <= ally.right + combatConfig.attackRange
+    && target.right >= ally.right
+    && target.bottom > ally.bottom - 50
+    && target.top < ally.bottom - 16
 }
 
 export class HealthBar {
@@ -64,18 +82,24 @@ export class HealthBar {
   destroy(): void { this.background.destroy(); this.fill.destroy(); this.label.destroy() }
 }
 
-type Target = 'player' | 'bus'
+export interface FriendlyTarget {
+  hp: number
+  readonly sprite: Phaser.Physics.Arcade.Sprite
+  takeDamage(amount: number): void
+}
+
+export type EnemyTarget = 'player' | 'bus' | FriendlyTarget
 export class Enemy {
   readonly sprite: Phaser.Physics.Arcade.Sprite
   readonly bar: HealthBar
   hp = combatConfig.enemyHealth
-  private target: Target | null = null
+  private target: EnemyTarget | null = null
   private hitAt = 0
   private finishAt = 0
   private nextAttackAt = 0
   private hitApplied = false
   private rangedPhase: 'walk' | 'charge' | 'release' = 'walk'
-  private rangedTarget: Target | null = null
+  private rangedTarget: EnemyTarget | null = null
   constructor(private scene: Phaser.Scene, x: number, groundY: number, readonly kind: EnemyKind = 'melee') {
     this.sprite = scene.physics.add.sprite(x, groundY, enemyActions.Walk.frames[0])
       .setOrigin(0.5, 1).setScale(1.6).setFlipX(true).setDepth(5)
@@ -84,16 +108,19 @@ export class Enemy {
     this.bar = new HealthBar(scene, 48, this.hp, kind === 'melee' ? '近戰' : '遠攻', kind === 'melee' ? 0xf47b86 : 0xffc477)
     this.sprite.play(enemyActions.Walk.key)
   }
-  update(time: number, player: Bounds, bus: Bounds, damage: (target: Target) => void,
+  update(time: number, player: Bounds, bus: Bounds, allies: FriendlyTarget[], damage: (target: EnemyTarget) => void,
     launch: (enemy: Enemy, target: Bounds) => void): void {
     if (this.hp <= 0) return
     if (this.kind === 'ranged') {
-      this.updateRanged(time, player, bus, launch)
+      this.updateRanged(time, player, bus, allies, launch)
       this.bar.update(this.sprite.x, this.sprite.y - 87, this.hp)
       return
     }
     const body = this.sprite.body as Phaser.Physics.Arcade.Body
-    const inRange = (target: Target) => canAttackFromLeft(body, target === 'player' ? player : bus)
+    const bounds = (target: EnemyTarget) => target === 'player' ? player
+      : target === 'bus' ? bus : target.sprite.body as Phaser.Physics.Arcade.Body
+    const alive = (target: EnemyTarget) => typeof target === 'string' || target.hp > 0
+    const inRange = (target: EnemyTarget) => alive(target) && canAttackFromLeft(body, bounds(target))
     // Abort immediately if the target jumps out of reach or passes behind us.
     if (this.target && !inRange(this.target)) this.target = null
     if (this.target) {
@@ -104,7 +131,8 @@ export class Enemy {
       }
       if (time >= this.finishAt) this.target = null
     } else {
-      const target = inRange('player') ? 'player' : inRange('bus') ? 'bus' : null
+      const ally = allies.filter(inRange).sort((a, b) => b.sprite.x - a.sprite.x)[0] ?? null
+      const target: EnemyTarget | null = inRange('player') ? 'player' : ally ?? (inRange('bus') ? 'bus' : null)
       if (target) {
         this.sprite.setVelocityX(0)
         if (time >= this.nextAttackAt) {
@@ -123,11 +151,13 @@ export class Enemy {
     this.bar.update(this.sprite.x, this.sprite.y - 87, this.hp)
   }
 
-  private updateRanged(time: number, player: Bounds, bus: Bounds,
+  private updateRanged(time: number, player: Bounds, bus: Bounds, allies: FriendlyTarget[],
     launch: (enemy: Enemy, target: Bounds) => void): void {
     const body = this.sprite.body as Phaser.Physics.Arcade.Body
-    const bounds = (target: Target) => target === 'player' ? player : bus
-    const reachable = (target: Target) => canShootFromLeft(body, bounds(target))
+    const bounds = (target: EnemyTarget) => target === 'player' ? player
+      : target === 'bus' ? bus : target.sprite.body as Phaser.Physics.Arcade.Body
+    const alive = (target: EnemyTarget) => typeof target === 'string' || target.hp > 0
+    const reachable = (target: EnemyTarget) => alive(target) && canShootFromLeft(body, bounds(target))
     if (this.rangedPhase === 'charge') {
       if (!this.rangedTarget || !reachable(this.rangedTarget)) {
         this.rangedPhase = 'walk'
@@ -145,7 +175,8 @@ export class Enemy {
       this.rangedPhase = 'walk'
       this.rangedTarget = null
     }
-    const target = reachable('player') ? 'player' : reachable('bus') ? 'bus' : null
+    const ally = allies.filter(reachable).sort((a, b) => b.sprite.x - a.sprite.x)[0] ?? null
+    const target: EnemyTarget | null = reachable('player') ? 'player' : ally ?? (reachable('bus') ? 'bus' : null)
     if (target) {
       this.sprite.setVelocityX(0)
       if (time >= this.nextAttackAt) {
@@ -171,4 +202,114 @@ export class Enemy {
       this.scene.time.delayedCall(90, () => { if (this.sprite.active) this.sprite.clearTint() })
     }
   }
+}
+
+const ALLY_TINT = 0x8f969f
+
+export class AllyUnit implements FriendlyTarget {
+  readonly sprite: Phaser.Physics.Arcade.Sprite
+  readonly bar: HealthBar
+  hp = combatConfig.enemyHealth
+  private target: Enemy | null = null
+  private hitAt = 0
+  private finishAt = 0
+  private nextAttackAt = 0
+  private hitApplied = false
+  private rangedPhase: 'walk' | 'aim' = 'walk'
+  private rangedTarget: Enemy | null = null
+
+  constructor(private scene: Phaser.Scene, x: number, groundY: number, readonly kind: EnemyKind = 'melee') {
+    this.sprite = scene.physics.add.sprite(x, groundY, avatarActions.Run.frames[0])
+      .setOrigin(0.5, 1).setScale(1.6).setDepth(5).setTint(ALLY_TINT).setCollideWorldBounds(true)
+    this.sprite.setSize(16, 38).setOffset(40, 46)
+    this.sprite.setData('ally', this)
+    this.bar = new HealthBar(scene, 48, this.hp, kind === 'melee' ? '友軍近戰' : '友軍遠攻', 0xaab2bd)
+    this.sprite.play(avatarActions.Run.key)
+  }
+
+  update(time: number, enemies: Enemy[], launch: (ally: AllyUnit, target: Bounds) => void): void {
+    if (this.hp <= 0) return
+    if (this.kind === 'ranged') {
+      this.updateRanged(time, enemies, launch)
+      this.bar.update(this.sprite.x, this.sprite.y - 87, this.hp)
+      return
+    }
+    const body = this.sprite.body as Phaser.Physics.Arcade.Body
+    const inRange = (enemy: Enemy) => enemy.hp > 0
+      && canAttackFromRight(body, enemy.sprite.body as Phaser.Physics.Arcade.Body)
+    if (this.target && !inRange(this.target)) this.target = null
+    if (this.target) {
+      this.sprite.setVelocityX(0)
+      if (!this.hitApplied && time >= this.hitAt) {
+        this.hitApplied = true
+        if (inRange(this.target)) this.target.takeDamage(combatConfig.enemyDamage)
+      }
+      if (time >= this.finishAt) this.target = null
+    } else {
+      const target = enemies.filter(inRange).sort((a, b) => a.sprite.x - b.sprite.x)[0] ?? null
+      if (target) {
+        this.sprite.setVelocityX(0)
+        if (time >= this.nextAttackAt) {
+          this.target = target
+          this.hitAt = time + combatConfig.attackWindup
+          this.finishAt = time + combatConfig.attackDuration
+          this.nextAttackAt = time + combatConfig.attackCooldown
+          this.hitApplied = false
+          this.sprite.play(avatarActions.SwordComboA.key)
+        } else this.sprite.play(avatarActions.Idle.key, true)
+      } else {
+        this.sprite.setVelocityX(combatConfig.enemySpeed)
+        this.sprite.play(avatarActions.Run.key, true)
+      }
+    }
+    this.bar.update(this.sprite.x, this.sprite.y - 87, this.hp)
+  }
+
+  private updateRanged(time: number, enemies: Enemy[],
+    launch: (ally: AllyUnit, target: Bounds) => void): void {
+    const body = this.sprite.body as Phaser.Physics.Arcade.Body
+    const reachable = (enemy: Enemy) => enemy.hp > 0
+      && canShootFromRight(body, enemy.sprite.body as Phaser.Physics.Arcade.Body)
+    if (this.rangedPhase === 'aim') {
+      if (!this.rangedTarget || !reachable(this.rangedTarget)) {
+        this.rangedPhase = 'walk'
+        this.rangedTarget = null
+      } else if (!this.sprite.anims.isPlaying) {
+        launch(this, this.rangedTarget.sprite.body as Phaser.Physics.Arcade.Body)
+        this.rangedPhase = 'walk'
+        this.rangedTarget = null
+        this.nextAttackAt = time + combatConfig.rangedCooldown
+        this.sprite.play(avatarActions.Idle.key)
+        return
+      } else return
+    }
+    const target = enemies.filter(reachable).sort((a, b) => a.sprite.x - b.sprite.x)[0] ?? null
+    if (target) {
+      this.sprite.setVelocityX(0)
+      if (time >= this.nextAttackAt) {
+        this.rangedTarget = target
+        this.rangedPhase = 'aim'
+        this.sprite.play(avatarActions.BowAim.key)
+      } else this.sprite.play(avatarActions.Idle.key, true)
+    } else {
+      this.sprite.setVelocityX(combatConfig.enemySpeed)
+      this.sprite.play(avatarActions.Run.key, true)
+    }
+  }
+
+  takeDamage(amount: number): void {
+    if (this.hp <= 0) return
+    this.hp = Math.max(0, this.hp - amount)
+    if (this.hp === 0) {
+      this.sprite.setVelocity(0).disableBody()
+      this.bar.destroy()
+      this.sprite.setTint(ALLY_TINT).play(avatarActions.Die.key)
+      this.sprite.once(Phaser.Animations.Events.ANIMATION_COMPLETE, () => this.sprite.destroy())
+    } else {
+      this.sprite.setTintFill(0xffffff)
+      this.scene.time.delayedCall(90, () => { if (this.sprite.active) this.sprite.setTint(ALLY_TINT) })
+    }
+  }
+
+  stop(): void { if (this.hp > 0) this.sprite.setVelocity(0).stop() }
 }
