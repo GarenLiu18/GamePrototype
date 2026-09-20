@@ -1,7 +1,7 @@
 :root {
   color-scheme: dark;
   font-family: system-ui, sans-serif;
-  background: #080a0f;
+  background: #050812;
 }
 
 * {
@@ -24,4 +24,5 @@ body,
 
 canvas {
   display: block;
+  image-rendering: pixelated;
 }

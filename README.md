@@ -1,28 +1,47 @@
-# Phaser Gameplay Prototype
+# Night Walk — Prototype 01
 
-一個用來快速驗證遊戲玩法的極簡 Phaser 3 專案，使用 Vite 與 TypeScript。
+A Phaser 3 + TypeScript side-scrolling movement prototype set in a pixel-art city.
 
-## 開始使用
+## Run
 
 ```bash
 npm install
 npm run dev
 ```
 
-終端機會顯示本機網址，通常是 <http://localhost:5173>。
+Open the URL printed by Vite. `npm run build` checks TypeScript and creates a production bundle; `npm run preview` serves that bundle.
 
-## 常用指令
+## Controls
 
-- `npm run dev`：啟動開發伺服器與熱更新
-- `npm run build`：檢查型別並建立正式版檔案
-- `npm run preview`：預覽正式版
+| Action | Keys |
+| --- | --- |
+| Move | A / D or Left / Right |
+| Jump | Space, W, or Up |
+| Return to start | R |
 
-## 從哪裡開始
+Hold jump for a higher jump; release early for a shorter hop. Jumping requires ground contact, with 100 ms of coyote time and a 120 ms input buffer. Holding jump does not automatically jump again on landing.
 
-直接編輯 `src/main.ts` 裡的 `PrototypeScene`。目前已設定：
+## Scene
 
-- 960 × 540 的遊戲畫面，會自動等比例縮放並置中
-- Arcade Physics（預設無重力）
-- 一個可立即替換的空白原型場景
+- A 3,840-pixel world, a 960 × 540 viewport, six parallax layers, and a following camera.
+- Continuous ground and solid elevated platforms for testing jumps and collisions.
+- A finish marker, position progress, and immediate restart.
+- Movement speed: 270 px/s; jump speed: 600 px/s; gravity: 1,400 px/s².
+- `src/main.ts` owns the scene, layout, physics, controls, and HUD.
+- `src/assets.ts` contains verified asset lists and action-level animation registration.
 
-需要圖片、音效等資源時，可建立 `public/assets/` 並從 `/assets/檔名` 載入。
+## Assets
+
+Existing static layers come from `public/assets/images/Backgrounds_{Sky,Moon,BuildingsFar,BuildingsBack,BuildingsMid,BuildingsClose}.png`.
+
+The character uses complete groups from `public/assets/sprites/Avatar/`:
+
+| Action directory | Frames | Playback |
+| --- | --- | --- |
+| Idle | Idle01–Idle07 (7) | 10 fps, loop |
+| Run | Run01–Run08 (8) | 10 fps, loop |
+| JumpRise | JumpRise01 (1) | Once, held during ascent |
+| JumpMid | JumpMid01 (1) | Once, held near apex |
+| JumpFall | JumpFall01 (1) | Once, held during descent |
+
+10 fps is an adjustable prototype assumption, not source timing metadata. Jump states use the dedicated single-frame source actions. All selected frames are 96 × 84; the collision body excludes transparent padding. No terrain tiles were found, so ground, platforms, and markers use Phaser primitives.
