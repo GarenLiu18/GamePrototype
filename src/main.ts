@@ -1,5 +1,5 @@
 import Phaser from 'phaser'
-import { avatarActions, backgrounds, loadAssets, registerAnimations } from './assets'
+import { avatarActions, backgrounds, bulletAction, loadAssets, registerAnimations } from './assets'
 import './style.css'
 
 const WORLD_WIDTH = 3840
@@ -9,6 +9,8 @@ const SPEED = 270
 const JUMP_SPEED = 600
 const COYOTE_MS = 100
 const JUMP_BUFFER_MS = 120
+const BULLET_SPEED = 760
+const BULLET_LIFETIME_MS = 1400
 const fontFamily = '"Segoe UI", "Microsoft JhengHei", sans-serif'
 
 class PrototypeScene extends Phaser.Scene {
@@ -23,6 +25,8 @@ class PrototypeScene extends Phaser.Scene {
   private jumpQueued = -Infinity
   private jumpReleased = false
   private reachedEnd = false
+  private bullets!: Phaser.Physics.Arcade.Group
+  private firing = false
 
   constructor() { super('prototype') }
 
@@ -40,6 +44,7 @@ class PrototypeScene extends Phaser.Scene {
     this.lastGrounded = -Infinity
     this.jumpQueued = -Infinity
     this.reachedEnd = false
+    this.firing = false
     registerAnimations(this)
     for (const [index, background] of backgrounds.entries()) {
       const sprite = this.add.tileSprite(0, 0, 960, 548, background.key)
@@ -77,6 +82,19 @@ class PrototypeScene extends Phaser.Scene {
     this.player.setSize(16, 38).setOffset(40, 46)
     this.player.setMaxVelocity(SPEED, 900)
     this.physics.add.collider(this.player, solids)
+    this.bullets = this.physics.add.group({ allowGravity: false, maxSize: 24 })
+    this.physics.add.overlap(this.bullets, solids, projectile => {
+      this.recycleBullet(projectile as Phaser.Physics.Arcade.Sprite)
+    })
+    this.player.on(Phaser.Animations.Events.ANIMATION_COMPLETE, (animation: Phaser.Animations.Animation) => {
+      if (animation.key === avatarActions.GunFire.key || animation.key === avatarActions.GunRunFire.key) {
+        this.firing = false
+      }
+    })
+    this.input.on('pointerdown', this.onPointerDown, this)
+    this.events.once(Phaser.Scenes.Events.SHUTDOWN, () => {
+      this.input.off('pointerdown', this.onPointerDown, this)
+    })
     this.playAction('Idle')
     this.cursors = this.input.keyboard!.createCursorKeys()
     this.keys = this.input.keyboard!.addKeys('A,D,W,R') as typeof this.keys
@@ -113,7 +131,7 @@ class PrototypeScene extends Phaser.Scene {
     hud.add(this.add.rectangle(480, 42, 960, 84, 0x090f20, 0.93))
     hud.add(this.add.rectangle(26, 29, 5, 25, 0xa0e6da))
     hud.add(text(42, 15, '夜行 / 城市漫遊', 22, '#eef6ff'))
-    hud.add(text(42, 47, 'PROTOTYPE 01     ·     移動與跳躍', 11, '#8ca3bc'))
+    hud.add(text(42, 47, 'PROTOTYPE 01     ·     移動 / 跳躍 / 射擊', 11, '#8ca3bc'))
     hud.add(text(709, 19, '探索進度', 11, '#8ca3bc'))
     this.progressText = text(925, 16, '0%', 16, '#a0e6da').setOrigin(1, 0)
     hud.add(this.progressText)
@@ -121,7 +139,7 @@ class PrototypeScene extends Phaser.Scene {
     this.progressFill = this.add.rectangle(709, 46, 0, 3, 0xa0e6da).setOrigin(0)
     hud.add(this.progressFill)
     hud.add(this.add.rectangle(480, 521, 960, 38, 0x090f20, 0.95))
-    hud.add(text(24, 511, 'A D / ← →  移動     SPACE / W / ↑  跳躍     R  回到起點', 12, '#b0c2d6'))
+    hud.add(text(24, 511, 'A D / ← → 移動    SPACE / W / ↑ 跳躍    滑鼠左鍵 射擊    R 重來', 12, '#b0c2d6'))
     this.stateText = text(935, 511, '向右探索 →', 12, '#a0e6da').setOrigin(1, 0)
     hud.add(this.stateText)
   }
@@ -130,7 +148,43 @@ class PrototypeScene extends Phaser.Scene {
     this.player.play(avatarActions[action].key, true)
   }
 
+  private onPointerDown(pointer: Phaser.Input.Pointer): void {
+    if (pointer.button === 0) this.fire()
+  }
+
+  private fire(): void {
+    // Let the complete shot animation finish before accepting the next click.
+    if (this.firing) return
+    const direction = this.player.flipX ? -1 : 1
+    const x = this.player.x + direction * 32
+    const y = this.player.y - 40
+    const bullet = this.bullets.get(x, y, bulletAction.frames[0], 'projectile') as
+      Phaser.Physics.Arcade.Sprite | null
+    if (!bullet) return
+    bullet.setTexture(bulletAction.frames[0], 'projectile')
+      .setOrigin(0.5).setScale(2).setDepth(6).setFlipX(direction < 0)
+    bullet.enableBody(true, x, y, true, true)
+    bullet.setSize(9, 2).setOffset(0, 0)
+    const bulletBody = bullet.body as Phaser.Physics.Arcade.Body
+    bulletBody.setAllowGravity(false)
+    bullet.setVelocity(direction * BULLET_SPEED, 0)
+    bullet.setData('expiresAt', this.time.now + BULLET_LIFETIME_MS)
+    bullet.play(bulletAction.key)
+    const body = this.player.body as Phaser.Physics.Arcade.Body
+    const running = (body.blocked.down || body.touching.down) && Math.abs(body.velocity.x) > 0
+    this.firing = true
+    this.playAction(running ? 'GunRunFire' : 'GunFire')
+  }
+
+  private recycleBullet(bullet: Phaser.Physics.Arcade.Sprite): void {
+    bullet.stop().disableBody(true, true)
+  }
+
   private resetPlayer(): void {
+    this.firing = false
+    for (const child of this.bullets.getChildren()) {
+      this.recycleBullet(child as Phaser.Physics.Arcade.Sprite)
+    }
     this.player.setPosition(START_X, GROUND_Y - 2).setVelocity(0, 0).setFlipX(false)
     this.lastGrounded = -Infinity
     this.jumpQueued = -Infinity
@@ -166,10 +220,19 @@ class PrototypeScene extends Phaser.Scene {
       this.player.setVelocityY(-240)
       this.jumpReleased = true
     }
-    if (body.velocity.y < -80) this.playAction('JumpRise')
-    else if (!grounded && body.velocity.y > 80) this.playAction('JumpFall')
-    else if (!grounded) this.playAction('JumpMid')
-    else this.playAction(direction ? 'Run' : 'Idle')
+    // Shooting owns the animation temporarily, while movement physics continue.
+    if (!this.firing) {
+      if (body.velocity.y < -80) this.playAction('JumpRise')
+      else if (!grounded && body.velocity.y > 80) this.playAction('JumpFall')
+      else if (!grounded) this.playAction('JumpMid')
+      else this.playAction(direction ? 'Run' : 'Idle')
+    }
+    for (const child of this.bullets.getChildren()) {
+      const bullet = child as Phaser.Physics.Arcade.Sprite
+      if (bullet.active && (time >= bullet.getData('expiresAt') || bullet.x < -32 || bullet.x > WORLD_WIDTH + 32)) {
+        this.recycleBullet(bullet)
+      }
+    }
     for (const layer of this.layers) layer.sprite.tilePositionX = this.cameras.main.scrollX * layer.speed
     if (this.player.x >= WORLD_WIDTH - 180) this.reachedEnd = true
     const progress = Phaser.Math.Clamp((this.player.x - START_X) / (WORLD_WIDTH - 180 - START_X), 0, 1)
