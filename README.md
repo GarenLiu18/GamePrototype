@@ -23,7 +23,7 @@ Open the URL printed by Vite. `npm run build` checks TypeScript and creates a pr
 
 Hold jump for a higher jump; release early for a shorter hop. Jumping requires ground contact, with 100 ms of coyote time and a 120 ms input buffer. Holding jump does not automatically jump again on landing. Raised platforms are one-way: jump upward through them, land from above, and press Down while standing on one to drop through it.
 
-Click inside the game to fire once. Each shot finishes its animation before accepting another click (250 ms standing/airborne, 400 ms running). Movement and jumping remain available during firing. Bullets travel horizontally at 760 px/s without gravity and are recycled on terrain contact, enemy contact, at the world edges, or after 1.4 seconds. Each bullet damages at most one enemy. R also clears bullets.
+Click inside the game to fire once. Each shot finishes its animation before accepting another click (250 ms standing/airborne, 400 ms running). The player has a three-round magazine; after the third shot it automatically plays all nine `Combat/GunReload` frames at 10 fps and cannot fire again until the 0.9-second reload completes. A hit reaction interrupts reloading and automatically resumes it after Knockback when the magazine is empty. Movement and jumping remain available during firing and reloading. Bullets travel horizontally at 760 px/s without gravity and are recycled on terrain contact, enemy contact, at the world edges, or after 1.4 seconds. Each bullet damages at most one enemy. R also clears bullets.
 
 ## Defense encounter
 
@@ -51,10 +51,12 @@ Click inside the game to fire once. Each shot finishes its animation before acce
 
 ## Boss
 
-- One Boss waits at the end of the second 3,840-pixel section (x = 7,680). It is displayed at 4.8× scale, exactly three times the regular enemy scale, has 1,200 HP (20× a 60 HP minion), and loops all seven `Enemy/PowerUp` frames at 10 fps.
+- One Boss waits at the end of the first 3,840-pixel section (x = 3,840). It is displayed at 4.8× scale, exactly three times the regular enemy scale, has 1,200 HP (20× a 60 HP minion), and loops all seven `Enemy/PowerUp` frames at 10 fps.
 - Before activation it patrols 180 pixels to either side of its starting point at 45 px/s. Once the player comes within 1,000 pixels, it permanently advances left at 52 px/s.
-- Within 1,200 pixels, the Boss continuously locks the closest living allied unit or player. A pulsing red ground circle follows the current closest target for three seconds, so the player can move closer than an ally to steal the lock.
+- Within 1,200 pixels, the Boss continuously locks the closest living allied unit or player. A pulsing red ground circle follows the current closest target for three seconds, so the player can move closer than an ally to steal the lock. Once the player becomes the closest target and steals that lock, it is committed to the player for the rest of that warning and cannot switch back to an ally, even if the player moves farther away.
+- The Boss stops moving as soon as red-circle locking begins and remains stationary through the floating-arrow phase. It resumes movement only after the special volley is released or the lock is cancelled.
 - When locking completes, the warning position freezes and ten red-tinted Avatar arrows spread outward from the Boss in a floating ring for 750 ms. Boss arrows use a 5.4× display scale (three times their previous 1.8× size) while retaining the original narrow hitbox. They then launch simultaneously toward the warning circle using half the normal ballistic flight time (2× speed). After the volley it waits four seconds before starting another lock.
+- During that special-attack cooldown, the Boss also has a normal ranged attack. It follows the regular ranged enemy's complete six-frame `BlastCharge` and five-frame `BlastAttack` sequence, stops briefly to attack, uses the same 520-pixel horizontal and 300-pixel vertical firing window, and prioritizes allied units before the player and bus. It fires one red Avatar arrow directly at the target without gravity at 950 px/s, 2.5× the regular ranged projectile's 380 px/s basis. A hit deals 20 damage, twice the regular ranged unit's 10 damage. After hitting an actor or the ground, the arrow keeps its impact angle, embeds in the ground for one second, and then disappears. It passes through elevated platforms like regular enemy shots.
 - At 50% HP or lower, volley count, arrow speed, and attack frequency are 2× their base values (20 arrows, 4× normal ballistic speed, half cooldown), while the arrows' outward floating distance becomes 1.5×. At 25% HP or lower, attack values become 3× (30 arrows, 6× normal ballistic speed, one-third cooldown) and floating distance becomes 2×. The three-second target warning remains unchanged for readability.
 - The first time its HP reaches zero, the Boss plays all seven `Enemy/Vanish` frames at 10 fps and disappears. A full-width red ground warning appears for 1.2 seconds, followed by five seconds of dense red arrow rain. Rain arrows damage the player, bus, allies, and normal enemies without faction checks; every point of actual damage dealt heals the Boss, capped at 1,200 HP. Elevated platforms stop the arrows, so actors directly beneath them are safe.
 - After the rain settles, an unhealed Boss stays defeated. If any health was absorbed, it returns with all ten `Enemy/Appear` frames at 10 fps and resumes combat. This last-stand rain triggers only once; a later zero-HP state uses `Vanish` and removes the Boss permanently.
@@ -89,6 +91,7 @@ The character uses complete groups from `public/assets/sprites/Avatar/`:
 | Combat/BowAim | BowAim01–BowAim04 (4) | 10 fps, once per allied ranged attack |
 | Combat/GunFire | GunFire01–GunFire05 (5) | 20 fps, once per stationary/airborne shot |
 | Combat/GunRunFire | GunRunFire01–GunRunFire08 (8) | 20 fps, once per moving grounded shot |
+| Combat/GunReload | GunReload01–GunReload09 (9) | 10 fps, once after every three shots |
 | Weapons/Bullet | Bullet01–Bullet02 (2) | 20 fps, loop while active |
 | Weapons/Arrow | Arrow01 (1) | Static ballistic projectile for allies and the Boss volley |
 

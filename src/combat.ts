@@ -10,7 +10,7 @@ export const combatConfig = {
   playerInvulnerability: 1200, playerBlinkInterval: 100,
   playerKnockbackSpeed: 260, playerKnockbackLift: 180,
   rangedRange: 520, rangedVerticalRange: 300, rangedCooldown: 2200,
-  projectileGravity: 650, projectileLifetime: 3500,
+  projectileGravity: 650, projectileSpeed: 380, projectileLifetime: 3500,
   waveInterval: 15000,
   boss: {
     health: 1200,
@@ -27,6 +27,8 @@ export const combatConfig = {
     arrowScale: 5.4,
     arrowSpeedMultiplier: 2,
     attackCooldown: 4000,
+    basicDamage: 20,
+    basicArrowSpeedMultiplier: 2.5,
     finalRainWarningDuration: 1200,
     finalRainDuration: 5000,
     finalRainSettleDuration: 1200,
@@ -62,7 +64,9 @@ export function canShootFromRight(ally: Bounds, target: Bounds): boolean {
 // Solve a ballistic arc to a snapshot of the target. No homing after release.
 export function ballisticVelocity(x: number, y: number, targetX: number, targetY: number,
   speedMultiplier = 1) {
-  const flightTime = Phaser.Math.Clamp(Math.abs(targetX - x) / 380, 0.65, 1.15) / speedMultiplier
+  const flightTime = Phaser.Math.Clamp(
+    Math.abs(targetX - x) / combatConfig.projectileSpeed, 0.65, 1.15,
+  ) / speedMultiplier
   return {
     x: (targetX - x) / flightTime,
     y: (targetY - y - 0.5 * combatConfig.projectileGravity * flightTime ** 2) / flightTime,
@@ -125,6 +129,7 @@ export interface HostileTarget {
 }
 
 export type EnemyTarget = 'player' | 'bus' | FriendlyTarget
+type BossBasicTarget = { bounds: Bounds; isAlive: () => boolean }
 export class Enemy implements HostileTarget {
   readonly sprite: Phaser.Physics.Arcade.Sprite
   readonly bar: HealthBar
@@ -254,11 +259,15 @@ export class Boss implements HostileTarget {
   private patrolDirection = -1
   private awakened = false
   private attackPhase: 'idle' | 'locking' | 'floating' = 'idle'
+  private basicPhase: 'idle' | 'charge' | 'release' = 'idle'
+  private basicTarget: BossBasicTarget | null = null
+  private nextBasicAttackAt = 0
   private lifePhase: 'alive' | 'vanishing' | 'rain' | 'appearing' | 'defeated' = 'alive'
   private finalRainUsed = false
   private finalRainStarted = false
   private shouldStartFinalRain = false
   private volleyMultiplier = 1
+  private lockCommittedToPlayer = false
   private lockStartedAt = 0
   private nextAttackAt = 0
   private releaseAt = 0
@@ -290,9 +299,10 @@ export class Boss implements HostileTarget {
   }
   get arrowFloatDistanceMultiplier(): number { return 1 + (this.volleyMultiplier - 1) * 0.5 }
 
-  update(time: number, player: Bounds, allies: FriendlyTarget[],
+  update(time: number, player: Bounds, bus: Bounds, allies: FriendlyTarget[],
     prepareVolley: (boss: Boss) => void,
     releaseVolley: (boss: Boss, target: Bounds) => void,
+    launchBasicArrow: (boss: Boss, target: Bounds) => void,
     startFinalRain: (boss: Boss) => void): void {
     if (this.lifePhase === 'defeated' || this.lifePhase === 'rain') return
     if (this.lifePhase === 'vanishing') {
@@ -314,6 +324,10 @@ export class Boss implements HostileTarget {
       }
       return
     }
+    if (this.basicPhase !== 'idle') {
+      this.sprite.setVelocityX(0)
+      if (this.updateBasicAttack(time, launchBasicArrow)) return
+    }
     const playerCenterX = (player.left + player.right) / 2
     if (!this.awakened && Math.abs(playerCenterX - this.sprite.x) <= combatConfig.boss.detectionRange) {
       this.awakened = true
@@ -327,16 +341,20 @@ export class Boss implements HostileTarget {
     }
     this.sprite.play(enemyActions.PowerUp.key, true)
 
-    if (this.attackPhase === 'idle' && time >= this.nextAttackAt
-      && this.closestTarget(player, allies)) {
-      this.attackPhase = 'locking'
-      this.lockStartedAt = time
+    if (this.attackPhase === 'idle' && time >= this.nextAttackAt) {
+      const target = this.closestTarget(player, allies)
+      if (target) {
+        this.attackPhase = 'locking'
+        this.lockStartedAt = time
+        this.lockCommittedToPlayer = target === player
+      }
     }
     if (this.attackPhase === 'locking') {
-      const target = this.closestTarget(player, allies)
+      const target = this.lockCommittedToPlayer ? player : this.closestTarget(player, allies)
       if (!target) {
         this.cancelLock(time)
       } else {
+        if (target === player) this.lockCommittedToPlayer = true
         const x = (target.left + target.right) / 2
         const y = target.bottom - 3
         const pulse = 1 + Math.sin((time - this.lockStartedAt) * 0.012) * 0.1
@@ -359,8 +377,62 @@ export class Boss implements HostileTarget {
       })
       this.attackPhase = 'idle'
       this.nextAttackAt = time + combatConfig.boss.attackCooldown / this.currentAttackMultiplier()
+      this.nextBasicAttackAt = Math.max(this.nextBasicAttackAt, time + 500)
+      this.lockCommittedToPlayer = false
       this.warning.setVisible(false)
     }
+    if (this.attackPhase !== 'idle') this.sprite.setVelocityX(0)
+    if (this.attackPhase === 'idle' && time < this.nextAttackAt && time >= this.nextBasicAttackAt) {
+      const target = this.findBasicTarget(player, bus, allies)
+      if (target) {
+        this.basicPhase = 'charge'
+        this.basicTarget = target
+        this.sprite.setVelocityX(0).play(enemyActions.BlastCharge.key)
+      }
+    }
+  }
+
+  private updateBasicAttack(time: number, launch: (boss: Boss, target: Bounds) => void): boolean {
+    if (this.basicPhase === 'charge') {
+      const body = this.sprite.body as Phaser.Physics.Arcade.Body
+      if (!this.basicTarget || !this.basicTarget.isAlive()
+        || !canShootFromLeft(body, this.basicTarget.bounds)) {
+        this.basicPhase = 'idle'
+        this.basicTarget = null
+        this.nextBasicAttackAt = time + 500
+        this.sprite.play(enemyActions.PowerUp.key)
+        return false
+      }
+      if (!this.sprite.anims.isPlaying) {
+        launch(this, this.basicTarget.bounds)
+        this.basicPhase = 'release'
+        this.nextBasicAttackAt = time + combatConfig.rangedCooldown
+        this.sprite.play(enemyActions.BlastAttack.key)
+      }
+      return true
+    }
+    if (this.basicPhase === 'release') {
+      if (this.sprite.anims.isPlaying) return true
+      this.basicPhase = 'idle'
+      this.basicTarget = null
+      this.sprite.play(enemyActions.PowerUp.key)
+    }
+    return false
+  }
+
+  private findBasicTarget(player: Bounds, bus: Bounds, allies: FriendlyTarget[]): BossBasicTarget | null {
+    const body = this.sprite.body as Phaser.Physics.Arcade.Body
+    const ally = allies
+      .filter(target => target.hp > 0 && target.sprite.active
+        && canShootFromLeft(body, target.sprite.body as Phaser.Physics.Arcade.Body))
+      .sort((a, b) => b.sprite.x - a.sprite.x)[0]
+    if (ally) return {
+      bounds: ally.sprite.body as Phaser.Physics.Arcade.Body,
+      isAlive: () => ally.hp > 0 && ally.sprite.active,
+    }
+    if (canShootFromLeft(body, player)) return { bounds: player, isAlive: () => true }
+    if (canShootFromLeft(body, bus)) return { bounds: bus, isAlive: () => true }
+    return null
   }
 
   private closestTarget(player: Bounds, allies: FriendlyTarget[]): Bounds | null {
@@ -385,6 +457,7 @@ export class Boss implements HostileTarget {
   private cancelLock(time: number): void {
     this.attackPhase = 'idle'
     this.nextAttackAt = time + 500
+    this.lockCommittedToPlayer = false
     this.warning.setVisible(false).setScale(1)
   }
 
@@ -404,6 +477,9 @@ export class Boss implements HostileTarget {
       this.lifePhase = 'vanishing'
       this.finalRainStarted = false
       this.attackPhase = 'idle'
+      this.lockCommittedToPlayer = false
+      this.basicPhase = 'idle'
+      this.basicTarget = null
       this.sprite.setVelocity(0).disableBody()
       this.warning.setVisible(false)
       this.bar.setVisible(false)

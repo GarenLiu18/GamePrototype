@@ -5,7 +5,7 @@ import './style.css'
 
 const BASE_WORLD_WIDTH = 3840
 const WORLD_WIDTH = BASE_WORLD_WIDTH * 6
-const BOSS_X = BASE_WORLD_WIDTH * 2
+const BOSS_X = BASE_WORLD_WIDTH
 const GROUND_Y = 470
 const START_X = 330
 const SPEED = 270
@@ -25,6 +25,7 @@ class PrototypeScene extends Phaser.Scene {
   private layers: { sprite: Phaser.GameObjects.TileSprite; speed: number }[] = []
   private healthText!: Phaser.GameObjects.Text
   private stateText!: Phaser.GameObjects.Text
+  private ammoText!: Phaser.GameObjects.Text
   private minimap!: Phaser.GameObjects.Graphics
   private minimapHud!: Phaser.GameObjects.Container
   private bossHud!: Phaser.GameObjects.Container
@@ -58,6 +59,7 @@ class PrototypeScene extends Phaser.Scene {
   private allyProjectiles!: Phaser.Physics.Arcade.Group
   private enemyProjectiles!: Phaser.Physics.Arcade.Group
   private bossArrows!: Phaser.Physics.Arcade.Group
+  private bossBasicArrows!: Phaser.Physics.Arcade.Group
   private bossRainArrows!: Phaser.Physics.Arcade.Group
   private bossRainWarning!: Phaser.GameObjects.Rectangle
   private bossRainText!: Phaser.GameObjects.Text
@@ -67,6 +69,8 @@ class PrototypeScene extends Phaser.Scene {
   private bossRainFinishAt = 0
   private nextBossRainBurstAt = 0
   private firing = false
+  private reloading = false
+  private playerAmmo = 3
 
   constructor() { super('prototype') }
 
@@ -98,6 +102,8 @@ class PrototypeScene extends Phaser.Scene {
     this.enemySpawnCenter = combatConfig.waveCluster.enemyCenter
     this.physics.resume()
     this.firing = false
+    this.reloading = false
+    this.playerAmmo = 3
     this.bossRainActive = false
     this.bossHudVisible = false
     this.bossHudCommitted = false
@@ -248,12 +254,43 @@ class PrototypeScene extends Phaser.Scene {
       this.recycleBullet(arrow)
       ally.takeDamage(combatConfig.enemyDamage)
     })
+    this.bossBasicArrows = this.physics.add.group({ allowGravity: false, maxSize: 16 })
+    this.physics.add.overlap(ground, this.bossBasicArrows, (_ground, projectile) => {
+      this.stickBossBasicArrow(projectile as Phaser.Physics.Arcade.Sprite)
+    })
+    this.physics.add.overlap(this.player, this.bossBasicArrows, (_player, projectile) => {
+      const arrow = projectile as Phaser.Physics.Arcade.Sprite
+      if (!arrow.active || this.gameEnded) return
+      this.takeDamage('player', arrow.getData('sourceX') as number, combatConfig.boss.basicDamage)
+      this.stickBossBasicArrow(arrow)
+    })
+    this.physics.add.overlap(this.bus, this.bossBasicArrows, (_bus, projectile) => {
+      const arrow = projectile as Phaser.Physics.Arcade.Sprite
+      if (!arrow.active || this.gameEnded) return
+      this.takeDamage('bus', arrow.getData('sourceX') as number, combatConfig.boss.basicDamage)
+      this.stickBossBasicArrow(arrow)
+    })
+    this.physics.add.overlap(this.allyGroup, this.bossBasicArrows, (target, projectile) => {
+      const arrow = projectile as Phaser.Physics.Arcade.Sprite
+      const ally = (target as Phaser.Physics.Arcade.Sprite).getData('ally') as AllyUnit
+      if (!arrow.active || ally.hp <= 0 || this.gameEnded) return
+      ally.takeDamage(combatConfig.boss.basicDamage)
+      this.stickBossBasicArrow(arrow)
+    })
     this.createBossRain(groundSolids)
     this.player.on(Phaser.Animations.Events.ANIMATION_COMPLETE, (animation: Phaser.Animations.Animation) => {
       if (animation.key === avatarActions.GunFire.key || animation.key === avatarActions.GunRunFire.key) {
         this.firing = false
+        if (this.playerAmmo === 0 && !this.hurt) this.startReload()
       }
-      if (animation.key === avatarActions.Knockback.key) this.hurt = false
+      if (animation.key === avatarActions.GunReload.key) {
+        this.reloading = false
+        this.playerAmmo = 3
+      }
+      if (animation.key === avatarActions.Knockback.key) {
+        this.hurt = false
+        if (this.playerAmmo === 0) this.startReload()
+      }
     })
     this.input.on('pointerdown', this.onPointerDown, this)
     this.events.once(Phaser.Scenes.Events.SHUTDOWN, () => {
@@ -330,7 +367,7 @@ class PrototypeScene extends Phaser.Scene {
     label(64, '01 / 巴士據點', '#a0e6da')
     label(1330, '02 / 高台區')
     label(2690, '03 / 最後一段')
-    label(BOSS_X - 210, 'BOSS / 第二區段終點', '#f47b86')
+    label(BOSS_X - 210, 'BOSS / 第一區段終點', '#f47b86')
     this.add.text(395, 425, '跳躍閃避  ↗', { fontFamily, fontSize: '13px', color: '#afc2d7' })
     this.add.text(1420, 430, '試試連續跳躍  →', { fontFamily, fontSize: '13px', color: '#afc2d7' })
     for (let x = 240; x < WORLD_WIDTH; x += 160) this.add.rectangle(x, 489, 34, 2, 0x435167)
@@ -371,6 +408,8 @@ class PrototypeScene extends Phaser.Scene {
     hud.add(text(925, 48, '敵軍紅／金 · 友軍灰 · 雙方近戰與遠攻', 11, '#8ca3bc').setOrigin(1, 0))
     hud.add(this.add.rectangle(480, 521, 960, 38, 0x090f20, 0.95))
     hud.add(text(24, 511, 'A D / ← → 移動    SPACE / W / ↑ 跳躍    ↓ 下落    滑鼠左鍵 射擊    R 重來', 12, '#b0c2d6'))
+    this.ammoText = text(705, 511, '', 12, '#a0e6da').setOrigin(1, 0)
+    hud.add(this.ammoText)
     this.stateText = text(935, 511, '守住巴士', 12, '#a0e6da').setOrigin(1, 0)
     hud.add(this.stateText)
   }
@@ -422,15 +461,27 @@ class PrototypeScene extends Phaser.Scene {
 
   private fire(): void {
     // Let the complete shot animation finish before accepting the next click.
-    if (this.firing || this.hurt || this.gameEnded) return
+    if (this.firing || this.reloading || this.hurt || this.gameEnded) return
+    if (this.playerAmmo <= 0) {
+      this.startReload()
+      return
+    }
     const direction = this.player.flipX ? -1 : 1
     const x = this.player.x + direction * 32
     const y = this.player.y - 40
     if (!this.launchPlayerBullet(x, y, direction)) return
+    this.playerAmmo -= 1
     const body = this.player.body as Phaser.Physics.Arcade.Body
     const running = (body.blocked.down || body.touching.down) && Math.abs(body.velocity.x) > 0
     this.firing = true
     this.playAction(running ? 'GunRunFire' : 'GunFire')
+  }
+
+  private startReload(): void {
+    if (this.reloading || this.hurt || this.gameEnded || this.playerAmmo > 0) return
+    this.firing = false
+    this.reloading = true
+    this.playAction('GunReload')
   }
 
   private launchPlayerBullet(x: number, y: number, direction: number): boolean {
@@ -471,6 +522,39 @@ class PrototypeScene extends Phaser.Scene {
     shot.setData('sourceX', enemy.sprite.x)
     shot.setData('expiresAt', this.time.now + combatConfig.projectileLifetime)
     shot.play(enemyProjectileAction.key)
+  }
+
+  private launchBossBasicArrow(boss: Boss, target: Bounds): void {
+    if (this.gameEnded || !boss.combatActive) return
+    const x = boss.sprite.x - 78
+    const y = boss.sprite.y - 170
+    const arrow = this.bossBasicArrows.get(x, y, allyArrowTexture, 'projectile') as
+      Phaser.Physics.Arcade.Sprite | null
+    if (!arrow) return
+    arrow.setTexture(allyArrowTexture, 'projectile').setOrigin(0.5)
+      .setScale(combatConfig.boss.arrowScale).setDepth(9)
+      .setFlipX(false).setAlpha(0.95).setTint(0xff405f)
+    arrow.enableBody(true, x, y, true, true)
+    arrow.setSize(23, 5).setOffset(0, 0)
+    const body = arrow.body as Phaser.Physics.Arcade.Body
+    body.setAllowGravity(false).setGravityY(0)
+    const targetX = (target.left + target.right) / 2
+    const targetY = (target.top + target.bottom) / 2
+    const angle = Phaser.Math.Angle.Between(x, y, targetX, targetY)
+    const speed = combatConfig.projectileSpeed * combatConfig.boss.basicArrowSpeedMultiplier
+    arrow.setVelocity(Math.cos(angle) * speed, Math.sin(angle) * speed).setRotation(angle)
+    arrow.setData('stuck', false)
+    arrow.setData('sourceX', boss.sprite.x)
+    arrow.setData('expiresAt', this.time.now + combatConfig.projectileLifetime)
+  }
+
+  private stickBossBasicArrow(arrow: Phaser.Physics.Arcade.Sprite): void {
+    if (!arrow.active || arrow.getData('stuck')) return
+    arrow.setVelocity(0).setY(GROUND_Y - 5)
+    const body = arrow.body as Phaser.Physics.Arcade.Body
+    body.enable = false
+    arrow.setData('stuck', true)
+    arrow.setData('expiresAt', this.time.now + 1000)
   }
 
   private prepareBossArrowVolley(boss: Boss): void {
@@ -526,6 +610,10 @@ class PrototypeScene extends Phaser.Scene {
   private startBossFinalRain(_boss: Boss): void {
     if (this.gameEnded || this.bossRainActive) return
     for (const child of this.bossArrows.getChildren()) {
+      const arrow = child as Phaser.Physics.Arcade.Sprite
+      if (arrow.active) this.recycleBullet(arrow)
+    }
+    for (const child of this.bossBasicArrows.getChildren()) {
       const arrow = child as Phaser.Physics.Arcade.Sprite
       if (arrow.active) this.recycleBullet(arrow)
     }
@@ -608,15 +696,17 @@ class PrototypeScene extends Phaser.Scene {
     else target.takeDamage(combatConfig.enemyDamage)
   }
 
-  private takeDamage(target: 'player' | 'bus', sourceX: number): void {
+  private takeDamage(target: 'player' | 'bus', sourceX: number,
+    amount = target === 'player' ? combatConfig.enemyDamage : combatConfig.busDamage): void {
     if (this.gameEnded) return
     if (target === 'player') {
       if (this.time.now < this.invulnerableUntil) return
-      this.playerHp = Math.max(0, this.playerHp - combatConfig.enemyDamage)
+      this.playerHp = Math.max(0, this.playerHp - amount)
       this.hitStartedAt = this.time.now
       this.invulnerableUntil = this.time.now + combatConfig.playerInvulnerability
       this.hurt = true
       this.firing = false
+      this.reloading = false
       this.lastGrounded = -Infinity
       this.jumpQueued = -Infinity
       this.jumpReleased = true
@@ -632,7 +722,7 @@ class PrototypeScene extends Phaser.Scene {
       this.tweens.add({ targets: flash, scale: 2.2, alpha: 0, duration: 160,
         onComplete: () => flash.destroy() })
     } else {
-      this.busHp = Math.max(0, this.busHp - combatConfig.busDamage)
+      this.busHp = Math.max(0, this.busHp - amount)
       this.bus.setTintFill(0xf47b86)
       this.time.delayedCall(120, () => { if (!this.gameEnded) this.bus.clearTint() })
     }
@@ -656,6 +746,7 @@ class PrototypeScene extends Phaser.Scene {
     for (const arrow of this.allyProjectiles.getChildren()) this.recycleBullet(arrow as Phaser.Physics.Arcade.Sprite)
     for (const shot of this.enemyProjectiles.getChildren()) this.recycleBullet(shot as Phaser.Physics.Arcade.Sprite)
     for (const arrow of this.bossArrows.getChildren()) this.recycleBullet(arrow as Phaser.Physics.Arcade.Sprite)
+    for (const arrow of this.bossBasicArrows.getChildren()) this.recycleBullet(arrow as Phaser.Physics.Arcade.Sprite)
     for (const arrow of this.bossRainArrows.getChildren()) this.recycleBullet(arrow as Phaser.Physics.Arcade.Sprite)
     this.bossRainActive = false
     this.bossRainWarning.setVisible(false)
@@ -675,6 +766,8 @@ class PrototypeScene extends Phaser.Scene {
     const melee = this.enemies.filter(enemy => enemy.hp > 0 && enemy.kind === 'melee').length
     const ranged = this.enemies.filter(enemy => enemy.hp > 0 && enemy.kind === 'ranged').length
     this.healthText.setText(`玩家 ${this.playerHp} / ${combatConfig.playerHealth}    巴士 ${this.busHp} / ${combatConfig.busHealth}    近戰 ${melee} · 遠攻 ${ranged}`)
+    this.ammoText.setColor(this.reloading ? '#ffc477' : '#a0e6da')
+      .setText(this.reloading ? '換彈中…' : `彈藥 ${this.playerAmmo} / 3`)
   }
 
   private updateBossHud(): void {
@@ -807,7 +900,7 @@ class PrototypeScene extends Phaser.Scene {
       this.jumpReleased = true
     }
     // Shooting owns the animation temporarily, while movement physics continue.
-    if (!this.firing && !this.hurt) {
+    if (!this.firing && !this.reloading && !this.hurt) {
       if (body.velocity.y < -80) this.playAction('JumpRise')
       else if (!grounded && body.velocity.y > 80) this.playAction('JumpFall')
       else if (!grounded) this.playAction('JumpMid')
@@ -820,10 +913,14 @@ class PrototypeScene extends Phaser.Scene {
       }
     }
     for (const layer of this.layers) layer.sprite.tilePositionX = this.cameras.main.scrollX * layer.speed
-    for (const projectileGroup of [this.enemyProjectiles, this.allyProjectiles]) {
+    for (const projectileGroup of [this.enemyProjectiles, this.allyProjectiles, this.bossBasicArrows]) {
       for (const child of projectileGroup.getChildren()) {
         const shot = child as Phaser.Physics.Arcade.Sprite
         if (!shot.active) continue
+        if (shot.getData('stuck')) {
+          if (time >= shot.getData('expiresAt')) this.recycleBullet(shot)
+          continue
+        }
         if (time >= shot.getData('expiresAt') || shot.x < -60 || shot.x > WORLD_WIDTH + 60 || shot.y > 620 || shot.y < -600) {
           this.recycleBullet(shot)
         } else {
@@ -861,9 +958,10 @@ class PrototypeScene extends Phaser.Scene {
       if (this.gameEnded) break
     }
     if (!this.gameEnded) {
-      this.boss.update(time, body, this.allies,
+      this.boss.update(time, body, this.bus.getBounds(), this.allies,
         attacker => this.prepareBossArrowVolley(attacker),
         (attacker, target) => this.releaseBossArrowVolley(attacker, target),
+        (attacker, target) => this.launchBossBasicArrow(attacker, target),
         attacker => this.startBossFinalRain(attacker))
       this.updateBossFinalRain(time)
     }
