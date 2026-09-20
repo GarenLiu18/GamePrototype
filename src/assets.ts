@@ -1,9 +1,9 @@
 import Phaser from 'phaser'
 
 // Complete file groups verified against public/assets, in numeric order.
-const action = (name: string, files: string[], loop: boolean, frameRate = 10) => ({
-  key: `anim/Avatar/${name}`,
-  frames: files.map(file => `sprites/Avatar/${name}/${file}`),
+const action = (name: string, files: string[], loop: boolean, frameRate = 10, character = 'Avatar') => ({
+  key: `anim/${character}/${name}`,
+  frames: files.map(file => `sprites/${character}/${name}/${file}`),
   // Adjustable prototype assumption: source images have no timing metadata.
   frameRate,
   repeat: loop ? -1 : 0,
@@ -15,6 +15,9 @@ export const avatarActions = {
   JumpRise: action('JumpRise', ['JumpRise01'], false),
   JumpMid: action('JumpMid', ['JumpMid01'], false),
   JumpFall: action('JumpFall', ['JumpFall01'], false),
+  Knockback: action('Knockback', [
+    'Knockback01', 'Knockback02', 'Knockback03', 'Knockback04', 'Knockback05', 'Knockback06',
+  ], false, 20),
   GunFire: action('Combat/GunFire', ['GunFire01', 'GunFire02', 'GunFire03', 'GunFire04', 'GunFire05'], false, 20),
   GunRunFire: action('Combat/GunRunFire', [
     'GunRunFire01', 'GunRunFire02', 'GunRunFire03', 'GunRunFire04',
@@ -23,6 +26,22 @@ export const avatarActions = {
 }
 
 export const bulletAction = action('Weapons/Bullet', ['Bullet01', 'Bullet02'], true, 20)
+export const enemyProjectileAction = action('Effects/Projectile', [
+  'Projectile01', 'Projectile02', 'Projectile03', 'Projectile04',
+], true, 12, 'Enemy')
+export const busTexture = 'images/Vehicles_BusWhite_Idle'
+export const enemyActions = {
+  Walk: action('Walk', ['Walk01', 'Walk02', 'Walk03', 'Walk04', 'Walk05', 'Walk06', 'Walk07', 'Walk08'], true, 10, 'Enemy'),
+  Idle: action('Idle', ['Idle01', 'Idle02', 'Idle03', 'Idle04', 'Idle05', 'Idle06', 'Idle07'], true, 10, 'Enemy'),
+  Attack: action('Attack', ['Attack01', 'Attack02', 'Attack03', 'Attack04', 'Attack05', 'Attack06'], false, 10, 'Enemy'),
+  BlastCharge: action('BlastCharge', [
+    'BlastCharge01', 'BlastCharge02', 'BlastCharge03', 'BlastCharge04', 'BlastCharge05', 'BlastCharge06',
+  ], false, 10, 'Enemy'),
+  BlastAttack: action('BlastAttack', [
+    'BlastAttack01', 'BlastAttack02', 'BlastAttack03', 'BlastAttack04', 'BlastAttack05',
+  ], false, 10, 'Enemy'),
+  Die: action('Die', ['Die01', 'Die02', 'Die03', 'Die04', 'Die05', 'Die06', 'Die07'], false, 10, 'Enemy'),
+}
 
 export const backgrounds = [
   { key: 'images/Backgrounds_Sky', speed: 0.03 },
@@ -35,15 +54,18 @@ export const backgrounds = [
 
 export function loadAssets(scene: Phaser.Scene): void {
   const base = import.meta.env.BASE_URL
-  const keys = [...backgrounds.map(layer => layer.key),
-    ...Object.values(avatarActions).flatMap(a => a.frames), ...bulletAction.frames]
+  const keys = [busTexture, ...backgrounds.map(layer => layer.key),
+    ...Object.values(avatarActions).flatMap(a => a.frames),
+    ...Object.values(enemyActions).flatMap(a => a.frames), ...bulletAction.frames, ...enemyProjectileAction.frames]
   for (const key of keys) {
     if (!scene.textures.exists(key)) scene.load.image(key, `${base}assets/${key}.png`)
   }
 }
 
 export function registerAnimations(scene: Phaser.Scene): void {
-  for (const animation of Object.values(avatarActions)) {
+  const bus = scene.textures.get(busTexture)
+  if (!bus.has('vehicle')) bus.add('vehicle', 0, 22, 18, 132, 46)
+  for (const animation of [...Object.values(avatarActions), ...Object.values(enemyActions)]) {
     if (!scene.anims.exists(animation.key)) {
       scene.anims.create({
         key: animation.key, frames: animation.frames.map(key => ({ key })),
@@ -62,6 +84,18 @@ export function registerAnimations(scene: Phaser.Scene): void {
       key: bulletAction.key,
       frames: bulletAction.frames.map(key => ({ key, frame: 'projectile' })),
       frameRate: bulletAction.frameRate, repeat: bulletAction.repeat,
+    })
+  }
+  // Shared visible bounds of all four enemy projectile frames (right-facing).
+  for (const key of enemyProjectileAction.frames) {
+    const texture = scene.textures.get(key)
+    if (!texture.has('projectile')) texture.add('projectile', 0, 30, 54, 39, 7)
+  }
+  if (!scene.anims.exists(enemyProjectileAction.key)) {
+    scene.anims.create({
+      key: enemyProjectileAction.key,
+      frames: enemyProjectileAction.frames.map(key => ({ key, frame: 'projectile' })),
+      frameRate: enemyProjectileAction.frameRate, repeat: enemyProjectileAction.repeat,
     })
   }
 }

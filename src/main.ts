@@ -1,10 +1,11 @@
 import Phaser from 'phaser'
-import { avatarActions, backgrounds, bulletAction, loadAssets, registerAnimations } from './assets'
+import { avatarActions, backgrounds, bulletAction, busTexture, enemyProjectileAction, loadAssets, registerAnimations } from './assets'
+import { ballisticVelocity, combatConfig, Enemy, HealthBar, type Bounds } from './combat'
 import './style.css'
 
 const WORLD_WIDTH = 3840
 const GROUND_Y = 470
-const START_X = 120
+const START_X = 330
 const SPEED = 270
 const JUMP_SPEED = 600
 const COYOTE_MS = 100
@@ -18,14 +19,23 @@ class PrototypeScene extends Phaser.Scene {
   private cursors!: Phaser.Types.Input.Keyboard.CursorKeys
   private keys!: Record<'A' | 'D' | 'W' | 'R', Phaser.Input.Keyboard.Key>
   private layers: { sprite: Phaser.GameObjects.TileSprite; speed: number }[] = []
-  private progressFill!: Phaser.GameObjects.Rectangle
-  private progressText!: Phaser.GameObjects.Text
+  private healthText!: Phaser.GameObjects.Text
   private stateText!: Phaser.GameObjects.Text
   private lastGrounded = -Infinity
   private jumpQueued = -Infinity
   private jumpReleased = false
-  private reachedEnd = false
+  private bus!: Phaser.GameObjects.Image
+  private enemies: Enemy[] = []
+  private playerHp = combatConfig.playerHealth
+  private busHp = combatConfig.busHealth
+  private playerBar!: HealthBar
+  private busBar!: HealthBar
+  private invulnerableUntil = 0
+  private hurt = false
+  private hitStartedAt = 0
+  private gameEnded = false
   private bullets!: Phaser.Physics.Arcade.Group
+  private enemyProjectiles!: Phaser.Physics.Arcade.Group
   private firing = false
 
   constructor() { super('prototype') }
@@ -43,7 +53,15 @@ class PrototypeScene extends Phaser.Scene {
     this.layers = []
     this.lastGrounded = -Infinity
     this.jumpQueued = -Infinity
-    this.reachedEnd = false
+    this.playerHp = combatConfig.playerHealth
+    this.busHp = combatConfig.busHealth
+    this.invulnerableUntil = 0
+    this.hurt = false
+    this.hitStartedAt = 0
+    this.jumpReleased = false
+    this.gameEnded = false
+    this.enemies = []
+    this.physics.resume()
     this.firing = false
     registerAnimations(this)
     for (const [index, background] of backgrounds.entries()) {
@@ -68,13 +86,14 @@ class PrototypeScene extends Phaser.Scene {
             6, GROUND_Y - top - height, 0x1e2b41).setDepth(-1)
         }
       }
+      return surface
     }
-    addPlatform(WORLD_WIDTH / 2, GROUND_Y, WORLD_WIDTH, 150)
+    const ground = addPlatform(WORLD_WIDTH / 2, GROUND_Y, WORLD_WIDTH, 150)
     for (const [x, y, width] of [
       [590, 394, 180], [855, 314, 150], [1110, 394, 180],
       [1640, 390, 200], [1900, 310, 150], [2160, 250, 180],
       [2450, 330, 200], [2900, 394, 180], [3180, 314, 180],
-    ]) addPlatform(x, y, width, 28)
+    ]) addPlatform(x, y - 30, width, 28)
     this.createLandmarks()
     this.player = this.physics.add.sprite(START_X, GROUND_Y, avatarActions.Idle.frames[0])
       .setOrigin(0.5, 1).setScale(1.6).setDepth(5).setCollideWorldBounds(true)
@@ -82,14 +101,61 @@ class PrototypeScene extends Phaser.Scene {
     this.player.setSize(16, 38).setOffset(40, 46)
     this.player.setMaxVelocity(SPEED, 900)
     this.physics.add.collider(this.player, solids)
+    this.bus = this.add.image(180, GROUND_Y, busTexture, 'vehicle').setOrigin(0.5, 1).setScale(2).setDepth(2)
+    this.physics.add.existing(this.bus, true)
+    this.playerBar = new HealthBar(this, 54, combatConfig.playerHealth, '玩家', 0xa0e6da)
+    this.busBar = new HealthBar(this, 180, combatConfig.busHealth, '守護巴士', 0x7cb7ff)
+    const enemyGroup = this.physics.add.group()
+    for (const { x, kind } of combatConfig.enemySpawns) {
+      const enemy = new Enemy(this, x, GROUND_Y, kind)
+      this.enemies.push(enemy)
+      enemyGroup.add(enemy.sprite)
+    }
+    // Enemies use the ground lane. Raised platforms leave headroom and are only
+    // used by the player; enemies never jump, turn around, or pursue upward.
+    this.physics.add.collider(enemyGroup, ground)
+    // Body contact uses the same damage gate as melee, including contact from
+    // behind. This does not change the enemy's forward-only attack targeting.
+    this.physics.add.overlap(this.player, enemyGroup, (_player, target) => {
+      const enemy = (target as Phaser.Physics.Arcade.Sprite).getData('enemy') as Enemy
+      if (enemy.hp > 0) this.takeDamage('player', enemy.sprite.x)
+    })
     this.bullets = this.physics.add.group({ allowGravity: false, maxSize: 24 })
     this.physics.add.overlap(this.bullets, solids, projectile => {
       this.recycleBullet(projectile as Phaser.Physics.Arcade.Sprite)
+    })
+    this.physics.add.overlap(this.bullets, enemyGroup, (projectile, target) => {
+      const bullet = projectile as Phaser.Physics.Arcade.Sprite
+      const enemy = (target as Phaser.Physics.Arcade.Sprite).getData('enemy') as Enemy
+      if (!bullet.active || enemy.hp <= 0 || this.gameEnded) return
+      this.recycleBullet(bullet)
+      enemy.takeDamage(combatConfig.bulletDamage)
+    })
+    this.enemyProjectiles = this.physics.add.group({ allowGravity: true, maxSize: 32 })
+    // Sprite-vs-group callbacks return the single actor first. Put it first
+    // explicitly, and recycle only the projectile in the second argument.
+    // Elevated platforms are intentionally excluded from enemy-shot collision.
+    this.physics.add.overlap(ground, this.enemyProjectiles, (_ground, projectile) => {
+      this.recycleBullet(projectile as Phaser.Physics.Arcade.Sprite)
+    })
+    this.physics.add.overlap(this.player, this.enemyProjectiles, (_player, projectile) => {
+      const shot = projectile as Phaser.Physics.Arcade.Sprite
+      if (!shot.active || this.gameEnded) return
+      const sourceX = shot.getData('sourceX') as number
+      this.recycleBullet(shot)
+      this.takeDamage('player', sourceX)
+    })
+    this.physics.add.overlap(this.bus, this.enemyProjectiles, (_bus, projectile) => {
+      const shot = projectile as Phaser.Physics.Arcade.Sprite
+      if (!shot.active || this.gameEnded) return
+      this.recycleBullet(shot)
+      this.takeDamage('bus', shot.getData('sourceX') as number)
     })
     this.player.on(Phaser.Animations.Events.ANIMATION_COMPLETE, (animation: Phaser.Animations.Animation) => {
       if (animation.key === avatarActions.GunFire.key || animation.key === avatarActions.GunRunFire.key) {
         this.firing = false
       }
+      if (animation.key === avatarActions.Knockback.key) this.hurt = false
     })
     this.input.on('pointerdown', this.onPointerDown, this)
     this.events.once(Phaser.Scenes.Events.SHUTDOWN, () => {
@@ -110,18 +176,13 @@ class PrototypeScene extends Phaser.Scene {
     const label = (x: number, text: string, color = '#91a5be') => {
       this.add.text(x, 483, text, { fontFamily, fontSize: '12px', color, letterSpacing: 2 })
     }
-    label(64, '01 / 起點', '#a0e6da')
+    label(64, '01 / 巴士據點', '#a0e6da')
     label(1330, '02 / 高台區')
     label(2690, '03 / 最後一段')
-    this.add.text(330, 430, '跳上平台  ↗', { fontFamily, fontSize: '13px', color: '#afc2d7' })
+    this.add.text(395, 425, '跳躍閃避  ↗', { fontFamily, fontSize: '13px', color: '#afc2d7' })
     this.add.text(1420, 430, '試試連續跳躍  →', { fontFamily, fontSize: '13px', color: '#afc2d7' })
     for (let x = 240; x < WORLD_WIDTH; x += 160) this.add.rectangle(x, 489, 34, 2, 0x435167)
-    const finishX = WORLD_WIDTH - 170
-    this.add.rectangle(finishX, 420, 3, 100, 0xa0e6da)
-    this.add.rectangle(finishX + 27, 381, 50, 24, 0xa0e6da)
-    this.add.text(finishX + 9, 373, '終點', {
-      fontFamily, fontSize: '13px', color: '#152536', fontStyle: 'bold',
-    })
+    this.add.text(WORLD_WIDTH - 260, 430, '← 敵人進攻方向', { fontFamily, fontSize: '13px', color: '#f47b86' })
   }
 
   private createHud(): void {
@@ -130,17 +191,14 @@ class PrototypeScene extends Phaser.Scene {
       this.add.text(x, y, value, { fontFamily, fontSize: `${size}px`, color })
     hud.add(this.add.rectangle(480, 42, 960, 84, 0x090f20, 0.93))
     hud.add(this.add.rectangle(26, 29, 5, 25, 0xa0e6da))
-    hud.add(text(42, 15, '夜行 / 城市漫遊', 22, '#eef6ff'))
-    hud.add(text(42, 47, 'PROTOTYPE 01     ·     移動 / 跳躍 / 射擊', 11, '#8ca3bc'))
-    hud.add(text(709, 19, '探索進度', 11, '#8ca3bc'))
-    this.progressText = text(925, 16, '0%', 16, '#a0e6da').setOrigin(1, 0)
-    hud.add(this.progressText)
-    hud.add(this.add.rectangle(709, 46, 216, 3, 0x304057).setOrigin(0))
-    this.progressFill = this.add.rectangle(709, 46, 0, 3, 0xa0e6da).setOrigin(0)
-    hud.add(this.progressFill)
+    hud.add(text(42, 15, '夜行 / 守護巴士', 22, '#eef6ff'))
+    hud.add(text(42, 47, 'PROTOTYPE 01     ·     阻止敵人摧毀巴士', 11, '#8ca3bc'))
+    this.healthText = text(925, 21, '', 15, '#a0e6da').setOrigin(1, 0)
+    hud.add(this.healthText)
+    hud.add(text(925, 48, '紅色近戰 · 金色遠攻 · 留意蓄力與拋物線', 11, '#8ca3bc').setOrigin(1, 0))
     hud.add(this.add.rectangle(480, 521, 960, 38, 0x090f20, 0.95))
     hud.add(text(24, 511, 'A D / ← → 移動    SPACE / W / ↑ 跳躍    滑鼠左鍵 射擊    R 重來', 12, '#b0c2d6'))
-    this.stateText = text(935, 511, '向右探索 →', 12, '#a0e6da').setOrigin(1, 0)
+    this.stateText = text(935, 511, '守住巴士', 12, '#a0e6da').setOrigin(1, 0)
     hud.add(this.stateText)
   }
 
@@ -154,7 +212,7 @@ class PrototypeScene extends Phaser.Scene {
 
   private fire(): void {
     // Let the complete shot animation finish before accepting the next click.
-    if (this.firing) return
+    if (this.firing || this.hurt || this.gameEnded) return
     const direction = this.player.flipX ? -1 : 1
     const x = this.player.x + direction * 32
     const y = this.player.y - 40
@@ -180,48 +238,131 @@ class PrototypeScene extends Phaser.Scene {
     bullet.stop().disableBody(true, true)
   }
 
-  private resetPlayer(): void {
-    this.firing = false
-    for (const child of this.bullets.getChildren()) {
-      this.recycleBullet(child as Phaser.Physics.Arcade.Sprite)
+  private launchEnemyProjectile(enemy: Enemy, target: Bounds): void {
+    if (this.gameEnded || enemy.hp <= 0) return
+    const x = enemy.sprite.x - 42
+    const y = enemy.sprite.y - 42
+    const shot = this.enemyProjectiles.get(x, y, enemyProjectileAction.frames[0], 'projectile') as
+      Phaser.Physics.Arcade.Sprite | null
+    if (!shot) return
+    shot.setTexture(enemyProjectileAction.frames[0], 'projectile').setOrigin(0.5)
+      .setScale(1.4).setDepth(7).setFlipX(false).setAlpha(1)
+    shot.enableBody(true, x, y, true, true)
+    shot.setSize(12, 8).setOffset(13.5, -0.5)
+    const body = shot.body as Phaser.Physics.Arcade.Body
+    body.setAllowGravity(true).setGravityY(combatConfig.projectileGravity - this.physics.world.gravity.y)
+    const velocity = ballisticVelocity(x, y, (target.left + target.right) / 2, (target.top + target.bottom) / 2)
+    shot.setVelocity(velocity.x, velocity.y).setRotation(Math.atan2(velocity.y, velocity.x))
+    shot.setData('sourceX', enemy.sprite.x)
+    shot.setData('expiresAt', this.time.now + combatConfig.projectileLifetime)
+    shot.play(enemyProjectileAction.key)
+  }
+
+  private takeDamage(target: 'player' | 'bus', sourceX: number): void {
+    if (this.gameEnded) return
+    if (target === 'player') {
+      if (this.time.now < this.invulnerableUntil) return
+      this.playerHp = Math.max(0, this.playerHp - combatConfig.enemyDamage)
+      this.hitStartedAt = this.time.now
+      this.invulnerableUntil = this.time.now + combatConfig.playerInvulnerability
+      this.hurt = true
+      this.firing = false
+      this.lastGrounded = -Infinity
+      this.jumpQueued = -Infinity
+      this.jumpReleased = true
+      const direction = this.player.x <= sourceX ? -1 : 1
+      this.player.setFlipX(direction > 0).setAlpha(1)
+        .setVelocity(direction * combatConfig.playerKnockbackSpeed, -combatConfig.playerKnockbackLift)
+      this.player.setTintFill(0xf47b86)
+      this.player.play(avatarActions.Knockback.key)
+      // No dedicated OnHit asset exists. A short procedural flash complements
+      // the complete source Knockback animation without replacing any frames.
+      const flash = this.add.circle(this.player.x, this.player.y - 36, 8, 0xffeee0, 0.8)
+        .setStrokeStyle(2, 0xffa4a6).setDepth(10)
+      this.tweens.add({ targets: flash, scale: 2.2, alpha: 0, duration: 160,
+        onComplete: () => flash.destroy() })
+    } else {
+      this.busHp = Math.max(0, this.busHp - combatConfig.busDamage)
+      this.bus.setTintFill(0xf47b86)
+      this.time.delayedCall(120, () => { if (!this.gameEnded) this.bus.clearTint() })
     }
-    this.player.setPosition(START_X, GROUND_Y - 2).setVelocity(0, 0).setFlipX(false)
-    this.lastGrounded = -Infinity
-    this.jumpQueued = -Infinity
-    this.reachedEnd = false
-    this.cameras.main.scrollX = 0
-    this.playAction('Idle')
+    if (this.playerHp === 0 || this.busHp === 0) {
+      this.endEncounter(this.busHp === 0 ? '巴士已被摧毀' : '玩家已倒下')
+    }
+  }
+
+  private endEncounter(message: string): void {
+    if (this.gameEnded) return
+    this.gameEnded = true
+    this.hurt = false
+    this.invulnerableUntil = 0
+    this.player.setAlpha(1).clearTint()
+    this.physics.pause()
+    this.player.setVelocity(0).stop()
+    for (const enemy of this.enemies) if (enemy.hp > 0) enemy.sprite.setVelocity(0).stop()
+    for (const bullet of this.bullets.getChildren()) this.recycleBullet(bullet as Phaser.Physics.Arcade.Sprite)
+    for (const shot of this.enemyProjectiles.getChildren()) this.recycleBullet(shot as Phaser.Physics.Arcade.Sprite)
+    if (this.playerHp === 0) this.player.setTint(0x8d5865)
+    if (this.busHp === 0) this.bus.setTint(0x665466)
+    const panel = this.add.container(480, 245).setScrollFactor(0).setDepth(200)
+    panel.add(this.add.rectangle(0, 0, 420, 140, 0x09111e, 0.96).setStrokeStyle(1, 0x7cb7ff))
+    panel.add(this.add.text(0, -30, message, { fontFamily, fontSize: '28px', color: '#eff6ff' }).setOrigin(0.5))
+    panel.add(this.add.text(0, 25, '按 R 重新開始守護巴士', { fontFamily, fontSize: '16px', color: '#a0e6da' }).setOrigin(0.5))
+    this.stateText.setText('R 重新開始')
+  }
+
+  private updateHealthDisplay(): void {
+    this.playerBar.update(this.player.x, this.player.y - 79, this.playerHp)
+    this.busBar.update(this.bus.x, this.bus.y - this.bus.displayHeight - 17, this.busHp)
+    const melee = this.enemies.filter(enemy => enemy.hp > 0 && enemy.kind === 'melee').length
+    const ranged = this.enemies.filter(enemy => enemy.hp > 0 && enemy.kind === 'ranged').length
+    this.healthText.setText(`玩家 ${this.playerHp} / ${combatConfig.playerHealth}    巴士 ${this.busHp} / ${combatConfig.busHealth}    近戰 ${melee} · 遠攻 ${ranged}`)
   }
 
   update(time: number): void {
     if (!this.player) return
-    if (Phaser.Input.Keyboard.JustDown(this.keys.R) || this.player.y > 590) this.resetPlayer()
+    if (Phaser.Input.Keyboard.JustDown(this.keys.R)) {
+      this.scene.restart()
+      return
+    }
+    this.updateHealthDisplay()
+    if (this.gameEnded) return
+    const invulnerable = time < this.invulnerableUntil
+    this.player.setAlpha(invulnerable && Math.floor((time - this.hitStartedAt) / combatConfig.playerBlinkInterval) % 2 === 1 ? 0.25 : 1)
+    if (!invulnerable || time - this.hitStartedAt >= 100) this.player.clearTint()
+    if (this.player.y > 590) {
+      this.playerHp = 0
+      this.endEncounter('玩家已倒下')
+      return
+    }
     const body = this.player.body as Phaser.Physics.Arcade.Body
     const grounded = body.blocked.down || body.touching.down
-    if (grounded) this.lastGrounded = time
+    if (grounded && !this.hurt) this.lastGrounded = time
     const left = this.cursors.left.isDown || this.keys.A.isDown
     const right = this.cursors.right.isDown || this.keys.D.isDown
     const direction = Number(right) - Number(left)
-    this.player.setVelocityX(direction * SPEED)
-    if (direction) this.player.setFlipX(direction < 0)
+    if (!this.hurt) {
+      this.player.setVelocityX(direction * SPEED)
+      if (direction) this.player.setFlipX(direction < 0)
+    }
     // Read every edge, including simultaneous keys, to avoid stale jump requests.
     const jumpEdges = [this.cursors.space, this.cursors.up, this.keys.W]
       .map(key => Phaser.Input.Keyboard.JustDown(key))
-    if (jumpEdges.some(Boolean)) this.jumpQueued = time
+    if (!this.hurt && jumpEdges.some(Boolean)) this.jumpQueued = time
     const jumpHeld = this.cursors.space.isDown || this.cursors.up.isDown || this.keys.W.isDown
-    if (time - this.jumpQueued <= JUMP_BUFFER_MS && time - this.lastGrounded <= COYOTE_MS) {
+    if (!this.hurt && time - this.jumpQueued <= JUMP_BUFFER_MS && time - this.lastGrounded <= COYOTE_MS) {
       this.player.setVelocityY(-JUMP_SPEED)
       this.lastGrounded = -Infinity
       this.jumpQueued = -Infinity
       this.jumpReleased = false
     }
     // Releasing early produces a shorter jump.
-    if (!jumpHeld && !this.jumpReleased && body.velocity.y < -240) {
+    if (!this.hurt && !jumpHeld && !this.jumpReleased && body.velocity.y < -240) {
       this.player.setVelocityY(-240)
       this.jumpReleased = true
     }
     // Shooting owns the animation temporarily, while movement physics continue.
-    if (!this.firing) {
+    if (!this.firing && !this.hurt) {
       if (body.velocity.y < -80) this.playAction('JumpRise')
       else if (!grounded && body.velocity.y > 80) this.playAction('JumpFall')
       else if (!grounded) this.playAction('JumpMid')
@@ -234,11 +375,23 @@ class PrototypeScene extends Phaser.Scene {
       }
     }
     for (const layer of this.layers) layer.sprite.tilePositionX = this.cameras.main.scrollX * layer.speed
-    if (this.player.x >= WORLD_WIDTH - 180) this.reachedEnd = true
-    const progress = Phaser.Math.Clamp((this.player.x - START_X) / (WORLD_WIDTH - 180 - START_X), 0, 1)
-    this.progressFill.width = 216 * progress
-    this.progressText.setText(`${Math.round(progress * 100)}%`)
-    this.stateText.setText(this.reachedEnd ? '已抵達終點！ R 再試一次' : '向右探索 →')
+    for (const child of this.enemyProjectiles.getChildren()) {
+      const shot = child as Phaser.Physics.Arcade.Sprite
+      if (!shot.active) continue
+      if (time >= shot.getData('expiresAt') || shot.x < -60 || shot.x > WORLD_WIDTH + 60 || shot.y > 620 || shot.y < -600) {
+        this.recycleBullet(shot)
+      } else {
+        const velocity = (shot.body as Phaser.Physics.Arcade.Body).velocity
+        shot.setRotation(Math.atan2(velocity.y, velocity.x))
+      }
+    }
+    for (const enemy of this.enemies) {
+      enemy.update(time, body, this.bus.getBounds(), target => this.takeDamage(target, enemy.sprite.x),
+        (attacker, target) => this.launchEnemyProjectile(attacker, target))
+      if (this.gameEnded) break
+    }
+    if (this.enemies.every(enemy => enemy.hp <= 0)) this.endEncounter('防守成功！巴士安全了')
+    this.updateHealthDisplay()
   }
 }
 
