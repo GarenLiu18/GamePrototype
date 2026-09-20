@@ -1,6 +1,6 @@
 import Phaser from 'phaser'
 import { allyArrowTexture, avatarActions, backgrounds, bulletAction, busTexture, enemyProjectileAction, loadAssets, registerAnimations } from './assets'
-import { AllyUnit, ballisticVelocity, combatConfig, Enemy, HealthBar, type Bounds, type EnemyTarget } from './combat'
+import { AllyUnit, ballisticVelocity, combatConfig, Enemy, HealthBar, type Bounds, type EnemyKind, type EnemyTarget } from './combat'
 import './style.css'
 
 const WORLD_WIDTH = 3840
@@ -250,27 +250,28 @@ class PrototypeScene extends Phaser.Scene {
     this.allies = this.allies.filter(ally => ally.sprite.active)
     this.wave += 1
     this.nextWaveAt = this.time.now + combatConfig.waveInterval
-    for (const [kind, spawnXs] of [
-      ['melee', combatConfig.waveSpawns.melee],
-      ['ranged', combatConfig.waveSpawns.ranged],
-    ] as const) {
-      for (const x of spawnXs) {
-        const enemy = new Enemy(this, x, GROUND_Y, kind)
-        this.enemies.push(enemy)
-        this.enemyGroup.add(enemy.sprite)
-      }
+    for (const { kind, x } of this.createWaveCluster(combatConfig.waveCluster.enemyCenter)) {
+      const enemy = new Enemy(this, x, GROUND_Y, kind)
+      this.enemies.push(enemy)
+      this.enemyGroup.add(enemy.sprite)
     }
-    for (const [kind, spawnXs] of [
-      ['melee', combatConfig.allyWaveSpawns.melee],
-      ['ranged', combatConfig.allyWaveSpawns.ranged],
-    ] as const) {
-      for (const x of spawnXs) {
-        const ally = new AllyUnit(this, x, GROUND_Y, kind)
-        this.allies.push(ally)
-        this.allyGroup.add(ally.sprite)
-      }
+    for (const { kind, x } of this.createWaveCluster(combatConfig.waveCluster.allyCenter)) {
+      const ally = new AllyUnit(this, x, GROUND_Y, kind)
+      this.allies.push(ally)
+      this.allyGroup.add(ally.sprite)
     }
     this.stateText.setText(`第 ${this.wave} 波來襲 · 下一波 ${combatConfig.waveInterval / 1000} 秒`)
+  }
+
+  private createWaveCluster(centerX: number): { kind: EnemyKind; x: number }[] {
+    const kinds: EnemyKind[] = ['melee', 'melee', 'melee', 'melee', 'melee', 'ranged', 'ranged', 'ranged']
+    Phaser.Utils.Array.Shuffle(kinds)
+    const middle = (kinds.length - 1) / 2
+    return kinds.map((kind, index) => ({
+      kind,
+      x: centerX + (index - middle) * combatConfig.waveCluster.spacing
+        + Phaser.Math.Between(-combatConfig.waveCluster.jitter, combatConfig.waveCluster.jitter),
+    }))
   }
 
   private onPointerDown(pointer: Phaser.Input.Pointer): void {

@@ -28,10 +28,10 @@ Click inside the game to fire once. Each shot finishes its animation before acce
 ## Defense encounter
 
 - The white bus is the spawn landmark. The player starts beside its front door.
-- Player: 100 HP; bus: 300 HP. Every 15 seconds, clustered waves spawn on both sides: five melee and three ranged enemies on the right, plus five melee and three ranged allies on the left. Each group occupies a 490-pixel-wide area, and living units from earlier waves remain. Every combat unit has 60 HP and deals 10 damage to another unit. Red health labels identify enemy melee units, amber labels identify enemy ranged units, and gray labels identify allies.
+- Player: 100 HP; bus: 300 HP. Every 15 seconds, clustered waves spawn on both sides: five melee and three ranged enemies on the right, plus five melee and three ranged allies on the left. Melee and ranged roles are shuffled together inside the same compact formation. Adjacent slots are 28 pixels apart with up to 6 pixels of random jitter, keeping the complete group within roughly 210 pixels. Living units from earlier waves remain. Every combat unit has 60 HP and deals 10 damage to another unit. Red health labels identify enemy melee units, amber labels identify enemy ranged units, and gray labels identify allies.
 - Enemies walk left at 65 px/s, never jump or turn around, and use the ground lane beneath the raised platforms.
 - A left-facing melee enemy can strike a target within 58 px of its body, overlapping its horizontal strike band (16–50 px above its feet). Players behind it are ignored.
-- A reachable player has priority over the bus. If the player jumps out of reach or moves behind the enemy, it immediately resumes walking left, or attacks the bus if already in reach.
+- Target priority is ally, then player, then bus. If any allied unit is inside an enemy's forward attack area, the enemy chooses an ally even when the player is closer. Distance only decides which ally to select. If the current target leaves the valid area or moves behind the enemy, it immediately resumes walking left or selects another valid target.
 - Attacks have a 200 ms windup, 600 ms animation, and 1,000 ms cooldown. Range and height are checked again before damage. Each attack deals 10 player damage or 20 bus damage.
 - Touching a living enemy from either side also deals 10 player damage. Contact damage and melee share the same 1,200 ms invulnerability window; additional hits during it do not deal damage, extend immunity, spawn effects, or cause more knockback. Enemies still never turn around to attack a player behind them.
 - An accepted hit pushes the player away from the enemy at 260 px/s with a small 180 px/s upward impulse. Movement, jumping, and firing are locked during the complete 300 ms Knockback animation, then resume while immunity remains active. Shooting animations are interrupted cleanly by damage.
@@ -43,7 +43,7 @@ Click inside the game to fire once. Each shot finishes its animation before acce
 
 ## Ranged enemies
 
-- Ranged units stop when a target is 48–520 px ahead and within 300 px vertically. A player in range has priority; otherwise they target the bus or continue walking left. They never turn to shoot a player behind them.
+- Ranged units stop when a target is 48–520 px ahead and within 300 px vertically. Their priority is ally, then player, then bus, so any reachable ally is selected ahead of a closer player. They never turn to shoot a target behind them.
 - Each shot plays all six BlastCharge frames (600 ms at 10 fps), then all five BlastAttack frames (500 ms at 10 fps). After release, they wait 2,200 ms before starting another charge. Leaving range or moving behind them during charging cancels that charge. Death also prevents release.
 - A projectile aims at the target's position at release and follows a fixed ballistic arc under 650 px/s² gravity. Flight time is distance-dependent (0.65–1.15 s). It does not track the target in flight, so moving after release can dodge it.
 - Enemy projectiles use all four `Enemy/Effects/Projectile` frames at 12 fps, loop, with a shared visible crop at (30, 54), 39 × 7 pixels. The sprite rotates along its velocity. They pass through elevated platforms; ground, player, or bus contact consumes them. A 3.5 s lifetime and world bounds also recycle them. Player bullets still collide with platforms.

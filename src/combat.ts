@@ -12,14 +12,12 @@ export const combatConfig = {
   rangedRange: 520, rangedVerticalRange: 300, rangedCooldown: 2200,
   projectileGravity: 650, projectileLifetime: 3500,
   waveInterval: 15000,
-  waveSpawns: {
-    melee: [2100, 2170, 2240, 2310, 2380],
-    ranged: [2450, 2520, 2590],
-  } satisfies Record<EnemyKind, number[]>,
-  allyWaveSpawns: {
-    melee: [630, 700, 770, 840, 910],
-    ranged: [420, 490, 560],
-  } satisfies Record<EnemyKind, number[]>,
+  waveCluster: {
+    enemyCenter: 2345,
+    allyCenter: 665,
+    spacing: 28,
+    jitter: 6,
+  },
 }
 
 export type Bounds = { left: number; right: number; top: number; bottom: number }
@@ -131,8 +129,10 @@ export class Enemy {
       }
       if (time >= this.finishAt) this.target = null
     } else {
+      // Allied units always outrank the player and bus when one is inside the
+      // forward strike band. Distance is only used to choose between allies.
       const ally = allies.filter(inRange).sort((a, b) => b.sprite.x - a.sprite.x)[0] ?? null
-      const target: EnemyTarget | null = inRange('player') ? 'player' : ally ?? (inRange('bus') ? 'bus' : null)
+      const target: EnemyTarget | null = ally ?? (inRange('player') ? 'player' : inRange('bus') ? 'bus' : null)
       if (target) {
         this.sprite.setVelocityX(0)
         if (time >= this.nextAttackAt) {
@@ -175,8 +175,10 @@ export class Enemy {
       this.rangedPhase = 'walk'
       this.rangedTarget = null
     }
+    // Allied units always outrank the player and bus when one is inside the
+    // firing window. Distance is only used to choose between allies.
     const ally = allies.filter(reachable).sort((a, b) => b.sprite.x - a.sprite.x)[0] ?? null
-    const target: EnemyTarget | null = reachable('player') ? 'player' : ally ?? (reachable('bus') ? 'bus' : null)
+    const target: EnemyTarget | null = ally ?? (reachable('player') ? 'player' : reachable('bus') ? 'bus' : null)
     if (target) {
       this.sprite.setVelocityX(0)
       if (time >= this.nextAttackAt) {
