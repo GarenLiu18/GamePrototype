@@ -10,6 +10,7 @@ export const combatConfig = {
   playerInvulnerability: 1200, playerBlinkInterval: 100,
   playerKnockbackSpeed: 260, playerKnockbackLift: 180,
   rangedRange: 520, rangedVerticalRange: 300, rangedCooldown: 2200,
+  combatStagger: { spacing: 8, jitter: 2, maxAdvance: 32 },
   projectileGravity: 650, projectileSpeed: 380, projectileLifetime: 3500,
   waveInterval: 15000,
   boss: {
@@ -49,16 +50,25 @@ export const combatConfig = {
 
 export type Bounds = { left: number; right: number; top: number; bottom: number }
 
-export function canShootFromLeft(enemy: Bounds, target: Bounds): boolean {
-  const dx = (enemy.left + enemy.right - target.left - target.right) / 2
-  const dy = (enemy.top + enemy.bottom - target.top - target.bottom) / 2
-  return dx >= 48 && dx <= combatConfig.rangedRange && Math.abs(dy) <= combatConfig.rangedVerticalRange
+// Spread a wave across distinct approach distances, then randomize who takes
+// each position. Keep these offsets for the unit's lifetime to avoid jitter.
+export function createCombatAdvances(count: number): number[] {
+  const { spacing, jitter, maxAdvance } = combatConfig.combatStagger
+  const step = count > 1 ? Math.min(spacing, maxAdvance / (count - 1)) : 0
+  return Phaser.Utils.Array.Shuffle(Array.from({ length: count }, (_, index) =>
+    Phaser.Math.Clamp(index * step + Phaser.Math.FloatBetween(-jitter, jitter), 0, maxAdvance)))
 }
 
-export function canShootFromRight(ally: Bounds, target: Bounds): boolean {
+export function canShootFromLeft(enemy: Bounds, target: Bounds, range = combatConfig.rangedRange): boolean {
+  const dx = (enemy.left + enemy.right - target.left - target.right) / 2
+  const dy = (enemy.top + enemy.bottom - target.top - target.bottom) / 2
+  return dx >= 48 && dx <= range && Math.abs(dy) <= combatConfig.rangedVerticalRange
+}
+
+export function canShootFromRight(ally: Bounds, target: Bounds, range = combatConfig.rangedRange): boolean {
   const dx = (target.left + target.right - ally.left - ally.right) / 2
   const dy = (target.top + target.bottom - ally.top - ally.bottom) / 2
-  return dx >= 48 && dx <= combatConfig.rangedRange && Math.abs(dy) <= combatConfig.rangedVerticalRange
+  return dx >= 48 && dx <= range && Math.abs(dy) <= combatConfig.rangedVerticalRange
 }
 
 // Solve a ballistic arc to a snapshot of the target. No homing after release.
@@ -74,17 +84,17 @@ export function ballisticVelocity(x: number, y: number, targetX: number, targetY
 }
 
 // Enemies face left permanently. Only the forward horizontal strike band can hit.
-export function canAttackFromLeft(enemy: Bounds, target: Bounds): boolean {
+export function canAttackFromLeft(enemy: Bounds, target: Bounds, range = combatConfig.attackRange): boolean {
   return (target.left + target.right) / 2 <= (enemy.left + enemy.right) / 2
-    && target.right >= enemy.left - combatConfig.attackRange
+    && target.right >= enemy.left - range
     && target.left <= enemy.left
     && target.bottom > enemy.bottom - 50
     && target.top < enemy.bottom - 16
 }
 
-export function canAttackFromRight(ally: Bounds, target: Bounds): boolean {
+export function canAttackFromRight(ally: Bounds, target: Bounds, range = combatConfig.attackRange): boolean {
   return (target.left + target.right) / 2 >= (ally.left + ally.right) / 2
-    && target.left <= ally.right + combatConfig.attackRange
+    && target.left <= ally.right + range
     && target.right >= ally.right
     && target.bottom > ally.bottom - 50
     && target.top < ally.bottom - 16
@@ -141,7 +151,8 @@ export class Enemy implements HostileTarget {
   private hitApplied = false
   private rangedPhase: 'walk' | 'charge' | 'release' = 'walk'
   private rangedTarget: EnemyTarget | null = null
-  constructor(private scene: Phaser.Scene, x: number, groundY: number, readonly kind: EnemyKind = 'melee') {
+  constructor(private scene: Phaser.Scene, x: number, groundY: number, readonly kind: EnemyKind = 'melee',
+    readonly combatAdvance = Phaser.Math.FloatBetween(0, combatConfig.combatStagger.maxAdvance)) {
     this.sprite = scene.physics.add.sprite(x, groundY, enemyActions.Walk.frames[0])
       .setOrigin(0.5, 1).setScale(1.6).setFlipX(true).setDepth(5)
     this.sprite.setSize(18, 44).setOffset(39, 40)
@@ -176,7 +187,7 @@ export class Enemy implements HostileTarget {
       // forward strike band. Distance is only used to choose between allies.
       const ally = allies.filter(inRange).sort((a, b) => b.sprite.x - a.sprite.x)[0] ?? null
       const target: EnemyTarget | null = ally ?? (inRange('player') ? 'player' : inRange('bus') ? 'bus' : null)
-      if (target) {
+      if (target && canAttackFromLeft(body, bounds(target), combatConfig.attackRange - this.combatAdvance)) {
         this.sprite.setVelocityX(0)
         if (time >= this.nextAttackAt) {
           this.target = target
@@ -222,7 +233,7 @@ export class Enemy implements HostileTarget {
     // firing window. Distance is only used to choose between allies.
     const ally = allies.filter(reachable).sort((a, b) => b.sprite.x - a.sprite.x)[0] ?? null
     const target: EnemyTarget | null = ally ?? (reachable('player') ? 'player' : reachable('bus') ? 'bus' : null)
-    if (target) {
+    if (target && canShootFromLeft(body, bounds(target), combatConfig.rangedRange - this.combatAdvance)) {
       this.sprite.setVelocityX(0)
       if (time >= this.nextAttackAt) {
         this.rangedTarget = target
@@ -534,7 +545,8 @@ export class AllyUnit implements FriendlyTarget {
   private rangedPhase: 'walk' | 'aim' = 'walk'
   private rangedTarget: HostileTarget | null = null
 
-  constructor(private scene: Phaser.Scene, x: number, groundY: number, readonly kind: EnemyKind = 'melee') {
+  constructor(private scene: Phaser.Scene, x: number, groundY: number, readonly kind: EnemyKind = 'melee',
+    readonly combatAdvance = Phaser.Math.FloatBetween(0, combatConfig.combatStagger.maxAdvance)) {
     this.sprite = scene.physics.add.sprite(x, groundY, avatarActions.Run.frames[0])
       .setOrigin(0.5, 1).setScale(1.6).setDepth(5).setTint(ALLY_TINT).setCollideWorldBounds(true)
     this.sprite.setSize(16, 38).setOffset(40, 46)
@@ -563,7 +575,8 @@ export class AllyUnit implements FriendlyTarget {
       if (time >= this.finishAt) this.target = null
     } else {
       const target = enemies.filter(inRange).sort((a, b) => a.sprite.x - b.sprite.x)[0] ?? null
-      if (target) {
+      if (target && canAttackFromRight(body, target.sprite.body as Phaser.Physics.Arcade.Body,
+        combatConfig.attackRange - this.combatAdvance)) {
         this.sprite.setVelocityX(0)
         if (time >= this.nextAttackAt) {
           this.target = target
@@ -600,7 +613,8 @@ export class AllyUnit implements FriendlyTarget {
       } else return
     }
     const target = enemies.filter(reachable).sort((a, b) => a.sprite.x - b.sprite.x)[0] ?? null
-    if (target) {
+    if (target && canShootFromRight(body, target.sprite.body as Phaser.Physics.Arcade.Body,
+      combatConfig.rangedRange - this.combatAdvance)) {
       this.sprite.setVelocityX(0)
       if (time >= this.nextAttackAt) {
         this.rangedTarget = target

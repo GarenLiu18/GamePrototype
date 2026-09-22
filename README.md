@@ -40,6 +40,7 @@ Click inside the game to fire once. Each shot finishes its animation before acce
 - Allies are gray-tinted copies of the player sprite and advance right at 65 px/s. Melee allies play the complete six-frame SwordComboA action when an enemy is in their forward strike band. Ranged allies stay behind the melee line, play all four BowAim frames, and then fire the Avatar arrow as a ballistic projectile. Enemies can target and damage allies; allies show individual health bars, play the complete nine-frame Die action at zero HP, and stop colliding after death.
 - Player death or bus destruction ends the encounter. Waves arrive on the fixed timer even when enemies from earlier waves are still alive, and continue without a final victory state. The HUD shows the current wave and the next-wave countdown. Press R to fully reset health and return to wave one after defeat or during play.
 - Balance values and directional melee logic are in `src/combat.ts`.
+- Each wave assigns regular enemies and allies persistent, shuffled combat approach offsets per unit type. Positions are spaced about 8 px apart with up to 2 px of random variation, capped at 32 px of extra advance. Units walk slightly farther into their existing melee or ranged reach before stopping, so five melee units attacking a stationary target spread out horizontally. Offsets stay fixed across attacks and target changes; actual hit/release checks retain the original reach and facing rules. Tune `combatConfig.combatStagger` to adjust the spread.
 
 ## Ranged enemies
 

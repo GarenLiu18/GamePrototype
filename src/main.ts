@@ -1,6 +1,6 @@
 import Phaser from 'phaser'
 import { allyArrowTexture, avatarActions, backgrounds, bulletAction, busTexture, enemyProjectileAction, loadAssets, registerAnimations } from './assets'
-import { AllyUnit, ballisticVelocity, Boss, combatConfig, Enemy, HealthBar, type Bounds, type EnemyKind, type EnemyTarget, type HostileTarget } from './combat'
+import { AllyUnit, ballisticVelocity, Boss, combatConfig, createCombatAdvances, Enemy, HealthBar, type Bounds, type EnemyKind, type EnemyTarget, type HostileTarget } from './combat'
 import './style.css'
 
 const BASE_WORLD_WIDTH = 3840
@@ -431,25 +431,30 @@ class PrototypeScene extends Phaser.Scene {
       combatConfig.waveCluster.enemyCenter,
       WORLD_WIDTH - combatConfig.waveCluster.edgePadding,
     )
-    for (const { kind, x } of this.createWaveCluster(this.enemySpawnCenter)) {
-      const enemy = new Enemy(this, x, GROUND_Y, kind)
+    for (const { kind, x, combatAdvance } of this.createWaveCluster(this.enemySpawnCenter)) {
+      const enemy = new Enemy(this, x, GROUND_Y, kind, combatAdvance)
       this.enemies.push(enemy)
       this.enemyGroup.add(enemy.sprite)
     }
-    for (const { kind, x } of this.createWaveCluster(combatConfig.waveCluster.allyCenter)) {
-      const ally = new AllyUnit(this, x, GROUND_Y, kind)
+    for (const { kind, x, combatAdvance } of this.createWaveCluster(combatConfig.waveCluster.allyCenter)) {
+      const ally = new AllyUnit(this, x, GROUND_Y, kind, combatAdvance)
       this.allies.push(ally)
       this.allyGroup.add(ally.sprite)
     }
     this.stateText.setText(`第 ${this.wave} 波來襲 · 下一波 ${combatConfig.waveInterval / 1000} 秒`)
   }
 
-  private createWaveCluster(centerX: number): { kind: EnemyKind; x: number }[] {
+  private createWaveCluster(centerX: number): { kind: EnemyKind; x: number; combatAdvance: number }[] {
     const kinds: EnemyKind[] = ['melee', 'melee', 'melee', 'melee', 'melee', 'ranged', 'ranged', 'ranged']
+    const advances = {
+      melee: createCombatAdvances(kinds.filter(kind => kind === 'melee').length),
+      ranged: createCombatAdvances(kinds.filter(kind => kind === 'ranged').length),
+    }
     Phaser.Utils.Array.Shuffle(kinds)
     const middle = (kinds.length - 1) / 2
     return kinds.map((kind, index) => ({
       kind,
+      combatAdvance: advances[kind].pop()!,
       x: centerX + (index - middle) * combatConfig.waveCluster.spacing
         + Phaser.Math.Between(-combatConfig.waveCluster.jitter, combatConfig.waveCluster.jitter),
     }))
