@@ -1,8 +1,16 @@
 import Phaser from 'phaser'
 import { avatarActions, enemyActions } from './assets'
-import { UnitProgression, type KillCredit } from './unit-progression'
+import { UnitProgression, type KillCredit, type UnitProgressionState } from './unit-progression'
 
 export type EnemyKind = 'melee' | 'ranged'
+
+export interface UnitDeath {
+  faction: 'ally' | 'enemy'
+  kind: EnemyKind
+  x: number
+  combatAdvance: number
+  progression?: UnitProgressionState
+}
 
 export const combatConfig = {
   playerHealth: 100, busHealth: 300, enemyHealth: 60, bulletDamage: 20,
@@ -16,7 +24,7 @@ export const combatConfig = {
   projectileFlightTimeVariation: 0.2,
   waveInterval: 15000,
   boss: {
-    health: 2500,
+    health: 25000,
     scale: 4.8,
     patrolRadius: 180,
     patrolSpeed: 45,
@@ -30,6 +38,7 @@ export const combatConfig = {
     arrowScale: 5.4,
     arrowSpeedMultiplier: 2,
     attackCooldown: 4000,
+    basicCooldown: 220,
     basicDamage: 20,
     basicArrowSpeedMultiplier: 2.5,
     finalRainWarningDuration: 1200,
@@ -159,7 +168,8 @@ export class Enemy implements HostileTarget {
   private rangedPhase: 'walk' | 'charge' | 'release' = 'walk'
   private rangedTarget: EnemyTarget | null = null
   constructor(private scene: Phaser.Scene, x: number, groundY: number, readonly kind: EnemyKind = 'melee',
-    readonly combatAdvance = Phaser.Math.FloatBetween(0, combatConfig.combatStagger.maxAdvance)) {
+    readonly combatAdvance = Phaser.Math.FloatBetween(0, combatConfig.combatStagger.maxAdvance),
+    private readonly onDeath?: (death: UnitDeath) => void) {
     this.sprite = scene.physics.add.sprite(x, groundY, enemyActions.Walk.frames[0])
       .setOrigin(0.5, 1).setScale(1.6).setFlipX(true).setDepth(5)
     this.sprite.setSize(18, 44).setOffset(39, 40)
@@ -265,6 +275,7 @@ export class Enemy implements HostileTarget {
     this.hp = Math.max(0, this.hp - amount)
     if (this.hp === 0) {
       credit?.recordKill()
+      this.onDeath?.({ faction: 'enemy', kind: this.kind, x: this.sprite.x, combatAdvance: this.combatAdvance })
       this.progression.destroy()
       this.sprite.setVelocity(0).disableBody()
       this.bar.destroy()
@@ -435,7 +446,7 @@ export class Boss implements HostileTarget {
       if (!this.sprite.anims.isPlaying) {
         launch(this, this.basicTarget.bounds)
         this.basicPhase = 'release'
-        this.nextBasicAttackAt = time + combatConfig.rangedCooldown
+        this.nextBasicAttackAt = time + combatConfig.boss.basicCooldown
         this.sprite.play(enemyActions.BlastAttack.key)
       }
       return true
@@ -569,13 +580,15 @@ export class AllyUnit implements FriendlyTarget {
   private rangedTarget: HostileTarget | null = null
 
   constructor(private scene: Phaser.Scene, x: number, groundY: number, readonly kind: EnemyKind = 'melee',
-    readonly combatAdvance = Phaser.Math.FloatBetween(0, combatConfig.combatStagger.maxAdvance)) {
+    readonly combatAdvance = Phaser.Math.FloatBetween(0, combatConfig.combatStagger.maxAdvance),
+    progressionState?: UnitProgressionState, private readonly onDeath?: (death: UnitDeath) => void) {
     this.sprite = scene.physics.add.sprite(x, groundY, avatarActions.Run.frames[0])
       .setOrigin(0.5, 1).setScale(1.6).setDepth(5).setTint(ALLY_TINT).setCollideWorldBounds(true)
     this.sprite.setSize(16, 38).setOffset(40, 46)
     this.sprite.setData('ally', this)
     this.bar = new HealthBar(scene, 48, this.hp, kind === 'melee' ? '友軍近戰' : '友軍遠攻', 0xaab2bd)
     this.progression = new UnitProgression(scene, this, combatConfig.enemyHealth)
+    if (progressionState) this.progression.restore(progressionState)
     this.sprite.play(avatarActions.Run.key)
   }
 
@@ -663,6 +676,10 @@ export class AllyUnit implements FriendlyTarget {
     this.hp = Math.max(0, this.hp - amount)
     if (this.hp === 0) {
       credit?.recordKill()
+      this.onDeath?.({
+        faction: 'ally', kind: this.kind, x: this.sprite.x, combatAdvance: this.combatAdvance,
+        progression: this.progression.snapshot(),
+      })
       this.progression.destroy()
       this.sprite.setVelocity(0).disableBody()
       this.bar.destroy()

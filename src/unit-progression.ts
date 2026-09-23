@@ -5,6 +5,11 @@ export interface KillCredit {
   recordKill(): void
 }
 
+export interface UnitProgressionState {
+  level: number
+  killsSinceLevelUp: number
+}
+
 interface ProgressionOwner {
   hp: number
   readonly sprite: Phaser.Physics.Arcade.Sprite
@@ -36,6 +41,24 @@ export class UnitProgression implements KillCredit {
   }
   get sizeMultiplier(): number { return this.owner.sprite.scaleX / this.baseScale }
   get healthBarY(): number { return this.owner.sprite.y - 87 * this.sizeMultiplier }
+
+  snapshot(): UnitProgressionState {
+    return { level: this.currentLevel, killsSinceLevelUp: this.killsSinceLevelUp }
+  }
+
+  restore(state: UnitProgressionState): void {
+    if (!config.enabled) return
+    this.currentLevel = Phaser.Math.Clamp(state.level, 0, config.maxLevel)
+    this.killsSinceLevelUp = Math.max(0, state.killsSinceLevelUp)
+    this.owner.hp = this.maxHealth
+    this.owner.sprite.setScale(this.baseScale * (1 + this.currentLevel * config.sizeIncreasePerLevel))
+    if (this.currentLevel > 0) {
+      this.star ??= this.scene.add.star(0, 0, 5, 4.5, 10, config.starColors[0])
+        .setStrokeStyle(2, 0x09111e).setDepth(22)
+      this.star.setFillStyle(config.starColors[this.currentLevel - 1])
+    }
+    this.update()
+  }
 
   recordKill(): void {
     // A projectile may land after its shooter died. Never heal or revive it.

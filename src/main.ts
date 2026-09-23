@@ -1,7 +1,7 @@
 import Phaser from 'phaser'
 import { allyArrowTexture, avatarActions, backgrounds, bulletAction, busTexture, enemyProjectileAction, loadAssets, registerAnimations } from './assets'
-import { AllyUnit, ballisticVelocity, Boss, combatConfig, createCombatAdvances, Enemy, HealthBar, type Bounds, type EnemyKind, type EnemyTarget, type HostileTarget } from './combat'
-import type { KillCredit } from './unit-progression'
+import { AllyUnit, ballisticVelocity, Boss, combatConfig, createCombatAdvances, Enemy, HealthBar, type Bounds, type EnemyKind, type EnemyTarget, type HostileTarget, type UnitDeath } from './combat'
+import type { KillCredit, UnitProgressionState } from './unit-progression'
 import './style.css'
 
 const BASE_WORLD_WIDTH = 3840
@@ -19,10 +19,22 @@ const BULLET_SPEED = 760
 const BULLET_LIFETIME_MS = 1400
 const fontFamily = '"Segoe UI", "Microsoft JhengHei", sans-serif'
 
+type Soul = {
+  marker: Phaser.GameObjects.Rectangle
+  caption: Phaser.GameObjects.Text
+  faction: 'ally' | 'enemy'
+  kind: EnemyKind
+  combatAdvance: number
+  progression?: UnitProgressionState
+  collected: boolean
+}
+
+type AllySpawnRequest = Pick<Soul, 'kind' | 'combatAdvance' | 'progression'>
+
 class PrototypeScene extends Phaser.Scene {
   private player!: Phaser.Physics.Arcade.Sprite
   private cursors!: Phaser.Types.Input.Keyboard.CursorKeys
-  private keys!: Record<'A' | 'D' | 'W' | 'R', Phaser.Input.Keyboard.Key>
+  private keys!: Record<'A' | 'D' | 'W' | 'R' | 'E', Phaser.Input.Keyboard.Key>
   private layers: { sprite: Phaser.GameObjects.TileSprite; speed: number }[] = []
   private healthText!: Phaser.GameObjects.Text
   private stateText!: Phaser.GameObjects.Text
@@ -47,7 +59,15 @@ class PrototypeScene extends Phaser.Scene {
   private oneWayPlatforms!: Phaser.Physics.Arcade.StaticGroup
   private wave = 0
   private nextWaveAt: number | null = null
+  private wavePausedAt: number | null = null
+  private pendingEnemyReinforcements: EnemyKind[] = []
   private enemySpawnCenter = combatConfig.waveCluster.enemyCenter
+  private allyBanner!: Phaser.GameObjects.Container
+  private bannerPrompt!: Phaser.GameObjects.Text
+  private bannerHeld = false
+  private pendingAllySpawns: AllySpawnRequest[] = []
+  private souls: Soul[] = []
+  private allySpawnSerial = 0
   private playerHp = combatConfig.playerHealth
   private busHp = combatConfig.busHealth
   private playerBar!: HealthBar
@@ -100,7 +120,13 @@ class PrototypeScene extends Phaser.Scene {
     this.enemies = []
     this.wave = 0
     this.nextWaveAt = null
+    this.wavePausedAt = null
+    this.pendingEnemyReinforcements = []
     this.enemySpawnCenter = combatConfig.waveCluster.enemyCenter
+    this.bannerHeld = false
+    this.pendingAllySpawns = []
+    this.souls = []
+    this.allySpawnSerial = 0
     this.physics.resume()
     this.firing = false
     this.reloading = false
@@ -165,6 +191,7 @@ class PrototypeScene extends Phaser.Scene {
     })
     this.bus = this.add.image(180, GROUND_Y, busTexture, 'vehicle').setOrigin(0.5, 1).setScale(2).setDepth(2)
     this.physics.add.existing(this.bus, true)
+    this.createAllyBanner()
     this.playerBar = new HealthBar(this, 54, combatConfig.playerHealth, '玩家', 0xa0e6da)
     this.busBar = new HealthBar(this, 180, combatConfig.busHealth, '守護巴士', 0x7cb7ff)
     this.allyGroup = this.physics.add.group()
@@ -308,14 +335,14 @@ class PrototypeScene extends Phaser.Scene {
     })
     this.playAction('Idle')
     this.cursors = this.input.keyboard!.createCursorKeys()
-    this.keys = this.input.keyboard!.addKeys('A,D,W,R') as typeof this.keys
+    this.keys = this.input.keyboard!.addKeys('A,D,W,R,E') as typeof this.keys
     this.input.keyboard!.addCapture(['SPACE', 'UP', 'DOWN', 'LEFT', 'RIGHT'])
     const camera = this.cameras.main
     camera.setBounds(0, 0, WORLD_WIDTH, 540)
     camera.startFollow(this.player, true, 0.09, 1)
     camera.setDeadzone(140, 540)
     this.createHud()
-    this.spawnWave()
+    this.spawnInitialForces()
   }
 
   private createBossRain(groundSolids: Phaser.Physics.Arcade.StaticGroup): void {
@@ -417,7 +444,7 @@ class PrototypeScene extends Phaser.Scene {
     hud.add(this.healthText)
     hud.add(text(925, 48, '敵軍紅／金 · 友軍灰 · 雙方近戰與遠攻', 11, '#8ca3bc').setOrigin(1, 0))
     hud.add(this.add.rectangle(480, 521, 960, 38, 0x090f20, 0.95))
-    hud.add(text(24, 511, 'A D / ← → 移動    SPACE / W / ↑ 跳躍    ↓ 下落    滑鼠左鍵 射擊    R 重來', 12, '#b0c2d6'))
+    hud.add(text(24, 511, 'A D / ← → 移動    SPACE / W / ↑ 跳躍    E 旗幟    滑鼠左鍵 射擊    R 重來', 12, '#b0c2d6'))
     this.ammoText = text(705, 511, '', 12, '#a0e6da').setOrigin(1, 0)
     hud.add(this.ammoText)
     this.stateText = text(935, 511, '守住巴士', 12, '#a0e6da').setOrigin(1, 0)
@@ -428,6 +455,15 @@ class PrototypeScene extends Phaser.Scene {
     this.player.play(avatarActions[action].key, true)
   }
 
+  private spawnInitialForces(): void {
+    this.spawnWave()
+    for (const { kind, x, combatAdvance } of this.createWaveCluster(this.allyBanner.x)) {
+      this.spawnAlly(kind, x, combatAdvance)
+    }
+  }
+
+  // Only the enemy receives scheduled waves. Allies now come from the opening
+  // formation, recovered ally souls, or enemy souls claimed by the player.
   private spawnWave(): void {
     this.enemies = this.enemies.filter(enemy => enemy.sprite.active)
     this.allies = this.allies.filter(ally => ally.sprite.active)
@@ -435,27 +471,23 @@ class PrototypeScene extends Phaser.Scene {
     this.nextWaveAt = this.time.now + combatConfig.waveInterval
     const allyFront = this.allies
       .filter(ally => ally.hp > 0)
-      .reduce((front, ally) => Math.max(front, ally.sprite.x), combatConfig.waveCluster.allyCenter)
+      .reduce((front, ally) => Math.max(front, ally.sprite.x), this.allyBanner.x)
     this.enemySpawnCenter = Phaser.Math.Clamp(
       Math.max(this.enemySpawnCenter, allyFront + combatConfig.waveCluster.enemyLead),
       combatConfig.waveCluster.enemyCenter,
       WORLD_WIDTH - combatConfig.waveCluster.edgePadding,
     )
-    for (const { kind, x, combatAdvance } of this.createWaveCluster(this.enemySpawnCenter)) {
-      const enemy = new Enemy(this, x, GROUND_Y, kind, combatAdvance)
-      this.enemies.push(enemy)
-      this.enemyGroup.add(enemy.sprite)
+    const reinforcements = this.pendingEnemyReinforcements.splice(0)
+    for (const { kind, x, combatAdvance } of this.createWaveCluster(this.enemySpawnCenter, reinforcements)) {
+      this.spawnEnemy(kind, x, combatAdvance)
     }
-    for (const { kind, x, combatAdvance } of this.createWaveCluster(combatConfig.waveCluster.allyCenter)) {
-      const ally = new AllyUnit(this, x, GROUND_Y, kind, combatAdvance)
-      this.allies.push(ally)
-      this.allyGroup.add(ally.sprite)
-    }
-    this.stateText.setText(`第 ${this.wave} 波來襲 · 下一波 ${combatConfig.waveInterval / 1000} 秒`)
+    this.releasePendingAllies()
   }
 
-  private createWaveCluster(centerX: number): { kind: EnemyKind; x: number; combatAdvance: number }[] {
-    const kinds: EnemyKind[] = ['melee', 'melee', 'melee', 'melee', 'melee', 'ranged', 'ranged', 'ranged']
+  private createWaveCluster(centerX: number, reinforcements: EnemyKind[] = []): { kind: EnemyKind; x: number; combatAdvance: number }[] {
+    const kinds: EnemyKind[] = [
+      'melee', 'melee', 'melee', 'melee', 'melee', 'ranged', 'ranged', 'ranged', ...reinforcements,
+    ]
     const advances = {
       melee: createCombatAdvances(kinds.filter(kind => kind === 'melee').length),
       ranged: createCombatAdvances(kinds.filter(kind => kind === 'ranged').length),
@@ -468,6 +500,127 @@ class PrototypeScene extends Phaser.Scene {
       x: centerX + (index - middle) * combatConfig.waveCluster.spacing
         + Phaser.Math.Between(-combatConfig.waveCluster.jitter, combatConfig.waveCluster.jitter),
     }))
+  }
+
+  private spawnEnemy(kind: EnemyKind, x: number, combatAdvance: number): void {
+    const enemy = new Enemy(this, x, GROUND_Y, kind, combatAdvance, death => this.createSoul(death))
+    this.enemies.push(enemy)
+    this.enemyGroup.add(enemy.sprite)
+  }
+
+  private spawnAlly(kind: EnemyKind, x: number, combatAdvance: number,
+    progression?: UnitProgressionState): void {
+    const ally = new AllyUnit(this, x, GROUND_Y, kind, combatAdvance, progression,
+      death => this.createSoul(death))
+    this.allies.push(ally)
+    this.allyGroup.add(ally.sprite)
+  }
+
+  private spawnAllyFromBanner(kind: EnemyKind, combatAdvance: number,
+    progression?: UnitProgressionState): void {
+    if (this.bannerHeld) {
+      this.pendingAllySpawns.push({ kind, combatAdvance, progression })
+      return
+    }
+    const offset = ((this.allySpawnSerial++ % 5) - 2) * 30
+    const x = Phaser.Math.Clamp(this.allyBanner.x + offset, 40, WORLD_WIDTH - 40)
+    this.spawnAlly(kind, x, combatAdvance, progression)
+  }
+
+  private releasePendingAllies(): void {
+    const requests = this.pendingAllySpawns.splice(0)
+    const middle = (requests.length - 1) / 2
+    Phaser.Utils.Array.Shuffle(requests)
+    for (const [index, request] of requests.entries()) {
+      const x = Phaser.Math.Clamp(
+        this.allyBanner.x + (index - middle) * combatConfig.waveCluster.spacing
+          + Phaser.Math.Between(-combatConfig.waveCluster.jitter, combatConfig.waveCluster.jitter),
+        40, WORLD_WIDTH - 40,
+      )
+      this.spawnAlly(request.kind, x, request.combatAdvance, request.progression)
+    }
+  }
+
+  private createAllyBanner(): void {
+    const aura = this.add.circle(0, -5, 29, 0x71d9cf, 0.12).setStrokeStyle(2, 0xa0e6da, 0.55)
+    const pole = this.add.rectangle(0, -47, 4, 86, 0xc7d7e7).setStrokeStyle(1, 0x24334b)
+    const finial = this.add.circle(0, -91, 5, 0xf9df84).setStrokeStyle(1, 0x533f18)
+    const cloth = this.add.polygon(3, -82, [0, 0, 38, 11, 0, 30], 0x4e8da5)
+      .setStrokeStyle(2, 0xa0e6da)
+    const emblem = this.add.star(15, -67, 4, 3, 7, 0xf9df84).setStrokeStyle(1, 0x624e1d)
+    this.allyBanner = this.add.container(combatConfig.waveCluster.allyCenter, GROUND_Y, [aura, pole, finial, cloth, emblem])
+      .setDepth(4)
+    this.bannerPrompt = this.add.text(this.allyBanner.x, this.allyBanner.y - 110, '', {
+      fontFamily, fontSize: '12px', color: '#d8fffa', backgroundColor: '#09111e',
+      padding: { x: 6, y: 3 },
+    }).setOrigin(0.5).setDepth(30)
+  }
+
+  private updateAllyBanner(): void {
+    if (this.bannerHeld) {
+      const direction = this.player.flipX ? -1 : 1
+      this.allyBanner.setPosition(this.player.x - direction * 24, this.player.y)
+    }
+    const nearby = Phaser.Math.Distance.Between(this.player.x, this.player.y, this.allyBanner.x, this.allyBanner.y) <= 72
+    const body = this.player.body as Phaser.Physics.Arcade.Body
+    const standingOnGround = this.player.y >= GROUND_Y - 4 && (body.blocked.down || body.touching.down)
+    if (Phaser.Input.Keyboard.JustDown(this.keys.E)) {
+      if (this.bannerHeld && standingOnGround) {
+        this.bannerHeld = false
+        this.allyBanner.setPosition(Phaser.Math.Clamp(this.player.x, 40, WORLD_WIDTH - 40), GROUND_Y)
+        if (this.wavePausedAt !== null && this.nextWaveAt !== null) {
+          this.nextWaveAt += this.time.now - this.wavePausedAt
+        }
+        this.wavePausedAt = null
+      } else if (!this.bannerHeld && nearby) {
+        this.bannerHeld = true
+        this.wavePausedAt = this.time.now
+      }
+    }
+    const prompt = this.bannerHeld
+      ? standingOnGround ? 'E: place ally banner' : 'Land on the ground to place banner'
+      : nearby ? 'E: pick up ally banner' : 'Ally banner'
+    this.bannerPrompt.setText(prompt).setPosition(this.allyBanner.x, this.allyBanner.y - 110)
+  }
+
+  private createSoul(death: UnitDeath): void {
+    if (this.gameEnded) return
+    const color = death.faction === 'ally' ? 0x8fe4dc : 0xf47b86
+    const marker = this.add.rectangle(death.x, GROUND_Y - 10, 22, 22, color)
+      .setStrokeStyle(2, 0xf4fbff).setDepth(4)
+    const caption = this.add.text(death.x, GROUND_Y - 39, death.faction === 'ally' ? 'ALLY SOUL' : 'ENEMY SOUL', {
+      fontFamily, fontSize: '10px', color: death.faction === 'ally' ? '#c8fff7' : '#ffc7cf',
+    }).setOrigin(0.5).setDepth(30)
+    this.physics.add.existing(marker)
+    const body = marker.body as Phaser.Physics.Arcade.Body
+    body.setAllowGravity(false).setImmovable(true).setSize(22, 22)
+    const soul: Soul = { marker, caption, ...death, collected: false }
+    this.souls.push(soul)
+    this.physics.add.overlap(this.player, marker, () => this.collectSoul(soul, 'player'))
+    // Enemies may only claim fallen allies. Their reward is delayed until the
+    // next scheduled wave, so no combatant is created at the pickup point.
+    if (death.faction === 'ally') {
+      this.physics.add.overlap(this.enemyGroup, marker, () => this.collectSoul(soul, 'enemy'))
+    }
+    this.tweens.add({ targets: marker, angle: 360, duration: 900, repeat: -1 })
+  }
+
+  private collectSoul(soul: Soul, collector: 'player' | 'enemy'): void {
+    if (soul.collected || !soul.marker.active || this.gameEnded) return
+    soul.collected = true
+    this.tweens.killTweensOf([soul.marker, soul.caption])
+    soul.marker.destroy()
+    soul.caption.destroy()
+    this.souls = this.souls.filter(candidate => candidate !== soul)
+    if (collector === 'player') {
+      if (soul.faction === 'ally' && soul.progression) {
+        this.spawnAllyFromBanner(soul.kind, soul.combatAdvance, soul.progression)
+      } else if (soul.faction === 'enemy') {
+        this.spawnAllyFromBanner(soul.kind, soul.combatAdvance)
+      }
+      return
+    }
+    this.pendingEnemyReinforcements.push(soul.kind)
   }
 
   private onPointerDown(pointer: Phaser.Input.Pointer): void {
@@ -858,6 +1011,7 @@ class PrototypeScene extends Phaser.Scene {
     graphics.lineStyle(1, 0xa0e6da, 0.55)
       .strokeRect(viewLeft, y + 4, Math.max(2, viewRight - viewLeft), height - 8)
     graphics.fillStyle(0x7cb7ff, 1).fillRect(mapX(this.bus.x) - 2, laneY - 7, 4, 14)
+    graphics.fillStyle(0xa0e6da, 1).fillCircle(mapX(this.allyBanner.x), laneY + 4, 3)
     for (const ally of this.allies) {
       if (ally.hp > 0) graphics.fillStyle(0xaab2bd, 1).fillCircle(mapX(ally.sprite.x), laneY + 4, 2)
     }
@@ -881,6 +1035,7 @@ class PrototypeScene extends Phaser.Scene {
       this.scene.restart()
       return
     }
+    if (!this.gameEnded) this.updateAllyBanner()
     this.updateHealthDisplay()
     this.updateBossHud()
     this.updateMinimap()
@@ -1004,11 +1159,16 @@ class PrototypeScene extends Phaser.Scene {
     this.enemies = this.enemies.filter(enemy => enemy.hp > 0 || enemy.sprite.active)
     this.allies = this.allies.filter(ally => ally.hp > 0 || ally.sprite.active)
     if (this.nextWaveAt !== null) {
-      if (time >= this.nextWaveAt) this.spawnWave()
-      const seconds = Math.max(0, Math.ceil((this.nextWaveAt - time) / 1000))
       const allyMelee = this.allies.filter(ally => ally.hp > 0 && ally.kind === 'melee').length
       const allyRanged = this.allies.filter(ally => ally.hp > 0 && ally.kind === 'ranged').length
-      this.stateText.setText(`第 ${this.wave} 波 · 友軍 ${allyMelee}/${allyRanged} · 下一波 ${seconds} 秒`)
+      if (this.bannerHeld) {
+        this.stateText.setText(`旗幟攜帶中 · 波次暫停 · 友軍排隊 ${this.pendingAllySpawns.length}`)
+      } else {
+        if (time >= this.nextWaveAt) this.spawnWave()
+        const seconds = Math.max(0, Math.ceil((this.nextWaveAt - time) / 1000))
+        const queued = this.pendingEnemyReinforcements.length
+        this.stateText.setText(`第 ${this.wave} 波 · 友軍 ${allyMelee}/${allyRanged} · 下一波 ${seconds} 秒${queued ? ` · 敵援 +${queued}` : ''}`)
+      }
     }
     this.updateHealthDisplay()
   }
