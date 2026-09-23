@@ -32,6 +32,13 @@ type Soul = {
 type AllySpawnRequest = Pick<Soul, 'kind' | 'combatAdvance' | 'progression'>
 
 type TouchControl = 'left' | 'right' | 'jump' | 'fire' | 'banner'
+type FullscreenDocument = Document & {
+  webkitFullscreenElement?: Element
+  webkitExitFullscreen?: () => Promise<void> | void
+}
+type FullscreenTarget = HTMLElement & {
+  webkitRequestFullscreen?: () => Promise<void> | void
+}
 
 class PrototypeScene extends Phaser.Scene {
   private player!: Phaser.Physics.Arcade.Sprite
@@ -96,6 +103,7 @@ class PrototypeScene extends Phaser.Scene {
   private playerAmmo = 3
   private touchControlPointers = new Map<number, TouchControl>()
   private bannerActionQueued = false
+  private fullscreenLabel!: Phaser.GameObjects.Text
 
   constructor() { super('prototype') }
 
@@ -353,6 +361,7 @@ class PrototypeScene extends Phaser.Scene {
     camera.setDeadzone(140, 540)
     this.createHud()
     this.createTouchControls()
+    this.createFullscreenButton()
     this.spawnInitialForces()
   }
 
@@ -482,6 +491,48 @@ class PrototypeScene extends Phaser.Scene {
     addButton(770, 435, '旗', 'banner', 0x71d9cf)
     addButton(900, 435, '射', 'fire', 0xf47b86)
     addButton(835, 490, '跳', 'jump', 0xf9df84)
+  }
+
+  private createFullscreenButton(): void {
+    const button = this.add.rectangle(886, 72, 88, 24, 0x132238, 0.92)
+      .setStrokeStyle(1, 0x71d9cf, 0.9).setScrollFactor(0).setDepth(120).setInteractive()
+    this.fullscreenLabel = this.add.text(886, 72, '全螢幕', {
+      fontFamily, fontSize: '11px', color: '#d8fffa', fontStyle: 'bold',
+    }).setOrigin(0.5).setScrollFactor(0).setDepth(121)
+    button.on('pointerdown', (_pointer: Phaser.Input.Pointer, _x: number, _y: number,
+      event: Phaser.Types.Input.EventData) => {
+      event.stopPropagation()
+      void this.toggleFullscreen()
+    })
+    document.addEventListener('fullscreenchange', this.updateFullscreenButton)
+    document.addEventListener('webkitfullscreenchange', this.updateFullscreenButton)
+    this.events.once(Phaser.Scenes.Events.SHUTDOWN, () => {
+      document.removeEventListener('fullscreenchange', this.updateFullscreenButton)
+      document.removeEventListener('webkitfullscreenchange', this.updateFullscreenButton)
+    })
+  }
+
+  private updateFullscreenButton = (): void => {
+    const documentWithFallback = document as FullscreenDocument
+    const isFullscreen = Boolean(document.fullscreenElement || documentWithFallback.webkitFullscreenElement)
+    this.fullscreenLabel?.setText(isFullscreen ? '離開全螢幕' : '全螢幕')
+  }
+
+  private async toggleFullscreen(): Promise<void> {
+    const documentWithFallback = document as FullscreenDocument
+    const isFullscreen = Boolean(document.fullscreenElement || documentWithFallback.webkitFullscreenElement)
+    const target = (this.game.canvas.parentElement ?? this.game.canvas) as FullscreenTarget
+    const requestFullscreen = target.requestFullscreen ?? target.webkitRequestFullscreen
+    const exitFullscreen = document.exitFullscreen ?? documentWithFallback.webkitExitFullscreen
+    try {
+      if (isFullscreen) {
+        if (exitFullscreen) await exitFullscreen.call(document)
+      } else if (requestFullscreen) {
+        await requestFullscreen.call(target)
+      }
+    } catch {
+      // Some mobile browsers do not permit browser-element fullscreen mode.
+    }
   }
 
   private createTouchRipple(x: number, y: number, color: number): void {
