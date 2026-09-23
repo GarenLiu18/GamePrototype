@@ -20,9 +20,14 @@ body,
 #game-container {
   display: grid;
   place-items: center;
+  touch-action: none;
 }
 
 canvas {
   display: block;
   image-rendering: pixelated;
+  touch-action: none;
+  user-select: none;
+  -webkit-user-select: none;
+  -webkit-tap-highlight-color: transparent;
 }

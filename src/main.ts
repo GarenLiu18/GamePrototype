@@ -31,6 +31,8 @@ type Soul = {
 
 type AllySpawnRequest = Pick<Soul, 'kind' | 'combatAdvance' | 'progression'>
 
+type TouchControl = 'left' | 'right' | 'jump' | 'fire' | 'banner'
+
 class PrototypeScene extends Phaser.Scene {
   private player!: Phaser.Physics.Arcade.Sprite
   private cursors!: Phaser.Types.Input.Keyboard.CursorKeys
@@ -92,6 +94,8 @@ class PrototypeScene extends Phaser.Scene {
   private firing = false
   private reloading = false
   private playerAmmo = 3
+  private touchControlPointers = new Map<number, TouchControl>()
+  private bannerActionQueued = false
 
   constructor() { super('prototype') }
 
@@ -134,6 +138,8 @@ class PrototypeScene extends Phaser.Scene {
     this.bossRainActive = false
     this.bossHudVisible = false
     this.bossHudCommitted = false
+    this.touchControlPointers.clear()
+    this.bannerActionQueued = false
     registerAnimations(this)
     for (const [index, background] of backgrounds.entries()) {
       const sprite = this.add.tileSprite(0, 0, 960, 548, background.key)
@@ -330,8 +336,12 @@ class PrototypeScene extends Phaser.Scene {
       }
     })
     this.input.on('pointerdown', this.onPointerDown, this)
+    this.input.on('pointerup', this.onPointerUp, this)
+    this.input.on('pointerupoutside', this.onPointerUp, this)
     this.events.once(Phaser.Scenes.Events.SHUTDOWN, () => {
       this.input.off('pointerdown', this.onPointerDown, this)
+      this.input.off('pointerup', this.onPointerUp, this)
+      this.input.off('pointerupoutside', this.onPointerUp, this)
     })
     this.playAction('Idle')
     this.cursors = this.input.keyboard!.createCursorKeys()
@@ -342,6 +352,7 @@ class PrototypeScene extends Phaser.Scene {
     camera.startFollow(this.player, true, 0.09, 1)
     camera.setDeadzone(140, 540)
     this.createHud()
+    this.createTouchControls()
     this.spawnInitialForces()
   }
 
@@ -449,6 +460,52 @@ class PrototypeScene extends Phaser.Scene {
     hud.add(this.ammoText)
     this.stateText = text(935, 511, '守住巴士', 12, '#a0e6da').setOrigin(1, 0)
     hud.add(this.stateText)
+  }
+
+  private createTouchControls(): void {
+    const addButton = (x: number, y: number, label: string, control: TouchControl, color: number) => {
+      const button = this.add.circle(x, y, 29, 0x09111e, 0.78)
+        .setStrokeStyle(2, color, 0.95).setScrollFactor(0).setDepth(120).setInteractive()
+      this.add.text(x, y, label, {
+        fontFamily, fontSize: label.length > 1 ? '13px' : '18px', color: '#f4fbff', fontStyle: 'bold',
+      }).setOrigin(0.5).setScrollFactor(0).setDepth(121)
+      button.on('pointerdown', (pointer: Phaser.Input.Pointer, _x: number, _y: number,
+        event: Phaser.Types.Input.EventData) => {
+        event.stopPropagation()
+        this.createTouchRipple(x, y, color)
+        this.pressTouchControl(control, pointer)
+      })
+    }
+    addButton(55, 465, '◀', 'left', 0x7cb7ff)
+    addButton(123, 465, '▶', 'right', 0x7cb7ff)
+    // PlayStation-style face-button layout: △ is intentionally omitted.
+    addButton(770, 435, '旗', 'banner', 0x71d9cf)
+    addButton(900, 435, '射', 'fire', 0xf47b86)
+    addButton(835, 490, '跳', 'jump', 0xf9df84)
+  }
+
+  private createTouchRipple(x: number, y: number, color: number): void {
+    const ripple = this.add.circle(x, y, 17, color, 0.14)
+      .setStrokeStyle(2, color, 0.9).setScrollFactor(0).setDepth(122)
+    this.tweens.add({
+      targets: ripple, scale: 1.9, alpha: 0, duration: 260, ease: 'Quad.Out',
+      onComplete: () => ripple.destroy(),
+    })
+  }
+
+  private pressTouchControl(control: TouchControl, pointer: Phaser.Input.Pointer): void {
+    this.touchControlPointers.set(pointer.id, control)
+    if (control === 'jump') this.jumpQueued = this.time.now
+    if (control === 'fire') this.fire()
+    if (control === 'banner') this.bannerActionQueued = true
+  }
+
+  private onPointerUp(pointer: Phaser.Input.Pointer): void {
+    this.touchControlPointers.delete(pointer.id)
+  }
+
+  private touchControlIsDown(control: TouchControl): boolean {
+    return [...this.touchControlPointers.values()].includes(control)
   }
 
   private playAction(action: keyof typeof avatarActions): void {
@@ -564,7 +621,9 @@ class PrototypeScene extends Phaser.Scene {
     const nearby = Phaser.Math.Distance.Between(this.player.x, this.player.y, this.allyBanner.x, this.allyBanner.y) <= 72
     const body = this.player.body as Phaser.Physics.Arcade.Body
     const standingOnGround = this.player.y >= GROUND_Y - 4 && (body.blocked.down || body.touching.down)
-    if (Phaser.Input.Keyboard.JustDown(this.keys.E)) {
+    const activateBanner = Phaser.Input.Keyboard.JustDown(this.keys.E) || this.bannerActionQueued
+    this.bannerActionQueued = false
+    if (activateBanner) {
       if (this.bannerHeld && standingOnGround) {
         this.bannerHeld = false
         this.allyBanner.setPosition(Phaser.Math.Clamp(this.player.x, 40, WORLD_WIDTH - 40), GROUND_Y)
@@ -624,7 +683,7 @@ class PrototypeScene extends Phaser.Scene {
   }
 
   private onPointerDown(pointer: Phaser.Input.Pointer): void {
-    if (pointer.button === 0) this.fire()
+    if (!this.touchControlPointers.has(pointer.id) && pointer.button === 0) this.fire()
   }
 
   private fire(): void {
@@ -1051,8 +1110,8 @@ class PrototypeScene extends Phaser.Scene {
     const body = this.player.body as Phaser.Physics.Arcade.Body
     let grounded = body.blocked.down || body.touching.down
     if (grounded && !this.hurt) this.lastGrounded = time
-    const left = this.cursors.left.isDown || this.keys.A.isDown
-    const right = this.cursors.right.isDown || this.keys.D.isDown
+    const left = this.cursors.left.isDown || this.keys.A.isDown || this.touchControlIsDown('left')
+    const right = this.cursors.right.isDown || this.keys.D.isDown || this.touchControlIsDown('right')
     const direction = Number(right) - Number(left)
     if (!this.hurt) {
       this.player.setVelocityX(direction * SPEED)
@@ -1071,6 +1130,7 @@ class PrototypeScene extends Phaser.Scene {
       .map(key => Phaser.Input.Keyboard.JustDown(key))
     if (!this.hurt && jumpEdges.some(Boolean)) this.jumpQueued = time
     const jumpHeld = this.cursors.space.isDown || this.cursors.up.isDown || this.keys.W.isDown
+      || this.touchControlIsDown('jump')
     if (!this.hurt && time - this.jumpQueued <= JUMP_BUFFER_MS && time - this.lastGrounded <= COYOTE_MS) {
       this.player.setVelocityY(-JUMP_SPEED)
       this.lastGrounded = -Infinity
@@ -1178,6 +1238,7 @@ new Phaser.Game({
   type: Phaser.AUTO, parent: 'game-container', width: 960, height: 540,
   backgroundColor: '#070b19', pixelArt: true, roundPixels: true,
   scale: { mode: Phaser.Scale.FIT, autoCenter: Phaser.Scale.CENTER_BOTH },
+  input: { activePointers: 3 },
   physics: { default: 'arcade', arcade: { gravity: { x: 0, y: 1400 }, debug: false } },
   scene: PrototypeScene,
 })
