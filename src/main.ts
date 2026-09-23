@@ -17,6 +17,9 @@ const DROP_THROUGH_MS = 300
 const DROP_THROUGH_SPEED = 120
 const BULLET_SPEED = 760
 const BULLET_LIFETIME_MS = 1400
+const CAMERA_FORWARD_FOCUS = 170
+const CAMERA_FOCUS_TRANSITION_DURATION = 700
+const CAMERA_TRACKING_SMOOTHING = 2.4
 const fontFamily = '"Segoe UI", "Microsoft JhengHei", sans-serif'
 
 type Soul = {
@@ -104,6 +107,8 @@ class PrototypeScene extends Phaser.Scene {
   private touchControlPointers = new Map<number, TouchControl>()
   private bannerActionQueued = false
   private fullscreenLabel!: Phaser.GameObjects.Text
+  private cameraFocusDirection = 1
+  private cameraFocus = { offset: CAMERA_FORWARD_FOCUS }
 
   constructor() { super('prototype') }
 
@@ -148,6 +153,8 @@ class PrototypeScene extends Phaser.Scene {
     this.bossHudCommitted = false
     this.touchControlPointers.clear()
     this.bannerActionQueued = false
+    this.cameraFocusDirection = 1
+    this.cameraFocus.offset = CAMERA_FORWARD_FOCUS
     registerAnimations(this)
     for (const [index, background] of backgrounds.entries()) {
       const sprite = this.add.tileSprite(0, 0, 960, 548, background.key)
@@ -357,8 +364,7 @@ class PrototypeScene extends Phaser.Scene {
     this.input.keyboard!.addCapture(['SPACE', 'UP', 'DOWN', 'LEFT', 'RIGHT'])
     const camera = this.cameras.main
     camera.setBounds(0, 0, WORLD_WIDTH, 540)
-    camera.startFollow(this.player, true, 0.09, 1)
-    camera.setDeadzone(140, 540)
+    camera.setScroll(0, 0)
     this.createHud()
     this.createTouchControls()
     this.createFullscreenButton()
@@ -557,6 +563,27 @@ class PrototypeScene extends Phaser.Scene {
 
   private touchControlIsDown(control: TouchControl): boolean {
     return [...this.touchControlPointers.values()].includes(control)
+  }
+
+  private updateCameraFocus(delta: number, movementDirection: number): void {
+    if (movementDirection !== 0 && movementDirection !== this.cameraFocusDirection) {
+      this.cameraFocusDirection = movementDirection
+      this.tweens.killTweensOf(this.cameraFocus)
+      this.tweens.add({
+        targets: this.cameraFocus,
+        offset: CAMERA_FORWARD_FOCUS * movementDirection,
+        duration: CAMERA_FOCUS_TRANSITION_DURATION,
+        ease: 'Cubic.easeOut',
+      })
+    }
+    const camera = this.cameras.main
+    const desiredScrollX = Phaser.Math.Clamp(
+      this.player.x + this.cameraFocus.offset - camera.width / 2,
+      0, WORLD_WIDTH - camera.width,
+    )
+    const blend = 1 - Math.exp(-CAMERA_TRACKING_SMOOTHING * delta / 1000)
+    camera.scrollX = Phaser.Math.Linear(camera.scrollX, desiredScrollX, blend)
+    camera.scrollY = 0
   }
 
   private playAction(action: keyof typeof avatarActions): void {
@@ -1139,7 +1166,7 @@ class PrototypeScene extends Phaser.Scene {
       .lineBetween(mapX(this.enemySpawnCenter), y + 5, mapX(this.enemySpawnCenter), y + height - 5)
   }
 
-  update(time: number): void {
+  update(time: number, delta: number): void {
     if (!this.player) return
     if (Phaser.Input.Keyboard.JustDown(this.keys.R)) {
       this.scene.restart()
@@ -1168,6 +1195,7 @@ class PrototypeScene extends Phaser.Scene {
       this.player.setVelocityX(direction * SPEED)
       if (direction) this.player.setFlipX(direction < 0)
     }
+    this.updateCameraFocus(delta, direction)
     if (!this.hurt && grounded && this.player.y < GROUND_Y - 8
       && Phaser.Input.Keyboard.JustDown(this.cursors.down)) {
       this.dropThroughUntil = time + DROP_THROUGH_MS
