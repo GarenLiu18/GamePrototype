@@ -473,7 +473,7 @@ class PrototypeScene extends Phaser.Scene {
 
   private createTouchControls(): void {
     const addButton = (x: number, y: number, label: string, control: TouchControl, color: number) => {
-      const button = this.add.circle(x, y, 29, 0x09111e, 0.78)
+      const button = this.add.circle(x, y, 32, 0x09111e, 0.78)
         .setStrokeStyle(2, color, 0.95).setScrollFactor(0).setDepth(120).setInteractive()
       this.add.text(x, y, label, {
         fontFamily, fontSize: label.length > 1 ? '13px' : '18px', color: '#f4fbff', fontStyle: 'bold',
@@ -485,8 +485,8 @@ class PrototypeScene extends Phaser.Scene {
         this.pressTouchControl(control, pointer)
       })
     }
-    addButton(55, 465, '◀', 'left', 0x7cb7ff)
-    addButton(123, 465, '▶', 'right', 0x7cb7ff)
+    addButton(47, 465, '◀', 'left', 0x7cb7ff)
+    addButton(131, 465, '▶', 'right', 0x7cb7ff)
     // PlayStation-style face-button layout: △ is intentionally omitted.
     addButton(770, 435, '旗', 'banner', 0x71d9cf)
     addButton(900, 435, '射', 'fire', 0xf47b86)
@@ -1288,7 +1288,9 @@ class PrototypeScene extends Phaser.Scene {
 new Phaser.Game({
   type: Phaser.AUTO, parent: 'game-container', width: 960, height: 540,
   backgroundColor: '#070b19', pixelArt: true, roundPixels: true,
-  scale: { mode: Phaser.Scale.FIT, autoCenter: Phaser.Scale.CENTER_BOTH },
+  // CSS Grid centers the canvas. Letting Phaser add centering margins as well
+  // shifts the visible game area to the right.
+  scale: { mode: Phaser.Scale.FIT, autoCenter: Phaser.Scale.NO_CENTER },
   input: { activePointers: 3 },
   physics: { default: 'arcade', arcade: { gravity: { x: 0, y: 1400 }, debug: false } },
   scene: PrototypeScene,
