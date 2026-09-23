@@ -1,6 +1,7 @@
 import Phaser from 'phaser'
 import { allyArrowTexture, avatarActions, backgrounds, bulletAction, busTexture, enemyProjectileAction, loadAssets, registerAnimations } from './assets'
 import { AllyUnit, ballisticVelocity, Boss, combatConfig, createCombatAdvances, Enemy, HealthBar, type Bounds, type EnemyKind, type EnemyTarget, type HostileTarget } from './combat'
+import type { KillCredit } from './unit-progression'
 import './style.css'
 
 const BASE_WORLD_WIDTH = 3840
@@ -177,7 +178,9 @@ class PrototypeScene extends Phaser.Scene {
     // behind. This does not change the enemy's forward-only attack targeting.
     this.physics.add.overlap(this.player, this.enemyGroup, (_player, target) => {
       const hostile = (target as Phaser.Physics.Arcade.Sprite).getData('enemy') as HostileTarget
-      if (hostile.hp > 0) this.takeDamage('player', hostile.sprite.x)
+      if (hostile.hp > 0) this.takeDamage('player', hostile.sprite.x,
+        hostile instanceof Enemy ? hostile.attackDamage : undefined,
+        hostile instanceof Enemy ? hostile.progression : undefined)
     })
     this.bullets = this.physics.add.group({ allowGravity: false, maxSize: 24 })
     const recyclePlayerBullet: Phaser.Types.Physics.Arcade.ArcadePhysicsCallback = projectile => {
@@ -200,8 +203,10 @@ class PrototypeScene extends Phaser.Scene {
       const shot = projectile as Phaser.Physics.Arcade.Sprite
       const enemy = (target as Phaser.Physics.Arcade.Sprite).getData('enemy') as HostileTarget
       if (!shot.active || enemy.hp <= 0 || this.gameEnded) return
+      const credit = shot.getData('killCredit') as KillCredit | undefined
+      const damage = shot.getData('damage') as number
       this.recycleBullet(shot)
-      enemy.takeDamage(combatConfig.enemyDamage)
+      enemy.takeDamage(damage, credit)
     })
     this.enemyProjectiles = this.physics.add.group({ allowGravity: true, maxSize: 32 })
     // Sprite-vs-group callbacks return the single actor first. Put it first
@@ -214,21 +219,26 @@ class PrototypeScene extends Phaser.Scene {
       const shot = projectile as Phaser.Physics.Arcade.Sprite
       if (!shot.active || this.gameEnded) return
       const sourceX = shot.getData('sourceX') as number
+      const credit = shot.getData('killCredit') as KillCredit | undefined
+      const damage = shot.getData('damage') as number
       this.recycleBullet(shot)
-      this.takeDamage('player', sourceX)
+      this.takeDamage('player', sourceX, damage, credit)
     })
     this.physics.add.overlap(this.bus, this.enemyProjectiles, (_bus, projectile) => {
       const shot = projectile as Phaser.Physics.Arcade.Sprite
       if (!shot.active || this.gameEnded) return
+      const damage = shot.getData('busDamage') as number
       this.recycleBullet(shot)
-      this.takeDamage('bus', shot.getData('sourceX') as number)
+      this.takeDamage('bus', shot.getData('sourceX') as number, damage)
     })
     this.physics.add.overlap(this.allyGroup, this.enemyProjectiles, (target, projectile) => {
       const shot = projectile as Phaser.Physics.Arcade.Sprite
       const ally = (target as Phaser.Physics.Arcade.Sprite).getData('ally') as AllyUnit
       if (!shot.active || ally.hp <= 0 || this.gameEnded) return
+      const credit = shot.getData('killCredit') as KillCredit | undefined
+      const damage = shot.getData('damage') as number
       this.recycleBullet(shot)
-      ally.takeDamage(combatConfig.enemyDamage)
+      ally.takeDamage(damage, credit)
     })
     this.bossArrows = this.physics.add.group({ allowGravity: false, maxSize: combatConfig.boss.volleySize * 3 })
     this.physics.add.overlap(ground, this.bossArrows, (_ground, projectile) => {
@@ -506,13 +516,16 @@ class PrototypeScene extends Phaser.Scene {
   }
 
   private recycleBullet(bullet: Phaser.Physics.Arcade.Sprite): void {
+    bullet.setData('killCredit', undefined)
+    bullet.setData('damage', undefined)
+    bullet.setData('busDamage', undefined)
     bullet.stop().disableBody(true, true)
   }
 
   private launchEnemyProjectile(enemy: Enemy, target: Bounds): void {
     if (this.gameEnded || enemy.hp <= 0) return
-    const x = enemy.sprite.x - 42
-    const y = enemy.sprite.y - 42
+    const x = enemy.sprite.x - 42 * enemy.progression.sizeMultiplier
+    const y = enemy.sprite.y - 42 * enemy.progression.sizeMultiplier
     const shot = this.enemyProjectiles.get(x, y, enemyProjectileAction.frames[0], 'projectile') as
       Phaser.Physics.Arcade.Sprite | null
     if (!shot) return
@@ -525,6 +538,10 @@ class PrototypeScene extends Phaser.Scene {
     const velocity = ballisticVelocity(x, y, (target.left + target.right) / 2, (target.top + target.bottom) / 2)
     shot.setVelocity(velocity.x, velocity.y).setRotation(Math.atan2(velocity.y, velocity.x))
     shot.setData('sourceX', enemy.sprite.x)
+    shot.setData('killCredit', enemy.progression)
+    // Capture damage at release so later level-ups cannot alter an in-flight shot.
+    shot.setData('damage', enemy.attackDamage)
+    shot.setData('busDamage', enemy.progression.scaleDamage(combatConfig.busDamage))
     shot.setData('expiresAt', this.time.now + combatConfig.projectileLifetime)
     shot.play(enemyProjectileAction.key)
   }
@@ -680,8 +697,8 @@ class PrototypeScene extends Phaser.Scene {
 
   private launchAllyProjectile(ally: AllyUnit, target: Bounds): void {
     if (this.gameEnded || ally.hp <= 0) return
-    const x = ally.sprite.x + 42
-    const y = ally.sprite.y - 42
+    const x = ally.sprite.x + 42 * ally.progression.sizeMultiplier
+    const y = ally.sprite.y - 42 * ally.progression.sizeMultiplier
     const shot = this.allyProjectiles.get(x, y, allyArrowTexture, 'projectile') as
       Phaser.Physics.Arcade.Sprite | null
     if (!shot) return
@@ -693,20 +710,26 @@ class PrototypeScene extends Phaser.Scene {
     body.setAllowGravity(true).setGravityY(combatConfig.projectileGravity - this.physics.world.gravity.y)
     const velocity = ballisticVelocity(x, y, (target.left + target.right) / 2, (target.top + target.bottom) / 2)
     shot.setVelocity(velocity.x, velocity.y).setRotation(Math.atan2(velocity.y, velocity.x))
+    shot.setData('killCredit', ally.progression)
+    shot.setData('damage', ally.attackDamage)
     shot.setData('expiresAt', this.time.now + combatConfig.projectileLifetime)
   }
 
-  private damageEnemyTarget(target: EnemyTarget, sourceX: number): void {
-    if (typeof target === 'string') this.takeDamage(target, sourceX)
-    else target.takeDamage(combatConfig.enemyDamage)
+  private damageEnemyTarget(target: EnemyTarget, enemy: Enemy): void {
+    if (typeof target === 'string') {
+      const damage = target === 'bus' ? enemy.progression.scaleDamage(combatConfig.busDamage) : enemy.attackDamage
+      this.takeDamage(target, enemy.sprite.x, damage, enemy.progression)
+    } else target.takeDamage(enemy.attackDamage, enemy.progression)
   }
 
   private takeDamage(target: 'player' | 'bus', sourceX: number,
-    amount = target === 'player' ? combatConfig.enemyDamage : combatConfig.busDamage): void {
+    amount = target === 'player' ? combatConfig.enemyDamage : combatConfig.busDamage,
+    credit?: KillCredit): void {
     if (this.gameEnded) return
     if (target === 'player') {
       if (this.time.now < this.invulnerableUntil) return
       this.playerHp = Math.max(0, this.playerHp - amount)
+      if (this.playerHp === 0) credit?.recordKill()
       this.hitStartedAt = this.time.now
       this.invulnerableUntil = this.time.now + combatConfig.playerInvulnerability
       this.hurt = true
@@ -958,7 +981,7 @@ class PrototypeScene extends Phaser.Scene {
     }
     for (const enemy of this.enemies) {
       enemy.update(time, body, this.bus.getBounds(), this.allies,
-        target => this.damageEnemyTarget(target, enemy.sprite.x),
+        target => this.damageEnemyTarget(target, enemy),
         (attacker, target) => this.launchEnemyProjectile(attacker, target))
       if (this.gameEnded) break
     }

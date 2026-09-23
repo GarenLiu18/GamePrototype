@@ -1,5 +1,6 @@
 import Phaser from 'phaser'
 import { avatarActions, enemyActions } from './assets'
+import { UnitProgression, type KillCredit } from './unit-progression'
 
 export type EnemyKind = 'melee' | 'ranged'
 
@@ -12,9 +13,10 @@ export const combatConfig = {
   rangedRange: 520, rangedVerticalRange: 300, rangedCooldown: 2200,
   combatStagger: { spacing: 8, jitter: 2, maxAdvance: 32 },
   projectileGravity: 650, projectileSpeed: 380, projectileLifetime: 3500,
+  projectileFlightTimeVariation: 0.2,
   waveInterval: 15000,
   boss: {
-    health: 1200,
+    health: 2500,
     scale: 4.8,
     patrolRadius: 180,
     patrolSpeed: 45,
@@ -71,12 +73,15 @@ export function canShootFromRight(ally: Bounds, target: Bounds, range = combatCo
   return dx >= 48 && dx <= range && Math.abs(dy) <= combatConfig.rangedVerticalRange
 }
 
-// Solve a ballistic arc to a snapshot of the target. No homing after release.
+// Vary the flight time once per shot to change arc height, then solve both
+// velocity components for the same target snapshot. No homing after release.
 export function ballisticVelocity(x: number, y: number, targetX: number, targetY: number,
   speedMultiplier = 1) {
+  const variation = combatConfig.projectileFlightTimeVariation
+  const arcTimeScale = Phaser.Math.FloatBetween(1 - variation, 1 + variation)
   const flightTime = Phaser.Math.Clamp(
     Math.abs(targetX - x) / combatConfig.projectileSpeed, 0.65, 1.15,
-  ) / speedMultiplier
+  ) * arcTimeScale / speedMultiplier
   return {
     x: (targetX - x) / flightTime,
     y: (targetY - y - 0.5 * combatConfig.projectileGravity * flightTime ** 2) / flightTime,
@@ -112,7 +117,8 @@ export class HealthBar {
       backgroundColor: '#09111e', padding: { x: 3, y: 1 },
     }).setOrigin(0.5, 1).setDepth(21)
   }
-  update(x: number, y: number, hp: number): void {
+  update(x: number, y: number, hp: number, max = this.max): void {
+    this.max = max
     this.background.setPosition(x, y)
     this.fill.setPosition(x - this.width / 2, y).setDisplaySize(this.width * Math.max(0, hp) / this.max, 4)
     this.label.setPosition(x, y - 7).setText(`${this.name} ${Math.max(0, hp)} / ${this.max}`)
@@ -128,14 +134,14 @@ export class HealthBar {
 export interface FriendlyTarget {
   hp: number
   readonly sprite: Phaser.Physics.Arcade.Sprite
-  takeDamage(amount: number): void
+  takeDamage(amount: number, credit?: KillCredit): void
 }
 
 export interface HostileTarget {
   hp: number
   readonly kind: EnemyKind | 'boss'
   readonly sprite: Phaser.Physics.Arcade.Sprite
-  takeDamage(amount: number): void
+  takeDamage(amount: number, credit?: KillCredit): void
 }
 
 export type EnemyTarget = 'player' | 'bus' | FriendlyTarget
@@ -143,6 +149,7 @@ type BossBasicTarget = { bounds: Bounds; isAlive: () => boolean }
 export class Enemy implements HostileTarget {
   readonly sprite: Phaser.Physics.Arcade.Sprite
   readonly bar: HealthBar
+  readonly progression: UnitProgression
   hp = combatConfig.enemyHealth
   private target: EnemyTarget | null = null
   private hitAt = 0
@@ -158,14 +165,17 @@ export class Enemy implements HostileTarget {
     this.sprite.setSize(18, 44).setOffset(39, 40)
     this.sprite.setData('enemy', this)
     this.bar = new HealthBar(scene, 48, this.hp, kind === 'melee' ? '近戰' : '遠攻', kind === 'melee' ? 0xf47b86 : 0xffc477)
+    this.progression = new UnitProgression(scene, this, combatConfig.enemyHealth)
     this.sprite.play(enemyActions.Walk.key)
   }
+  get attackDamage(): number { return this.progression.scaleDamage(combatConfig.enemyDamage) }
+
   update(time: number, player: Bounds, bus: Bounds, allies: FriendlyTarget[], damage: (target: EnemyTarget) => void,
     launch: (enemy: Enemy, target: Bounds) => void): void {
     if (this.hp <= 0) return
     if (this.kind === 'ranged') {
       this.updateRanged(time, player, bus, allies, launch)
-      this.bar.update(this.sprite.x, this.sprite.y - 87, this.hp)
+      this.updateIndicators()
       return
     }
     const body = this.sprite.body as Phaser.Physics.Arcade.Body
@@ -202,7 +212,12 @@ export class Enemy implements HostileTarget {
         this.sprite.play(enemyActions.Walk.key, true)
       }
     }
-    this.bar.update(this.sprite.x, this.sprite.y - 87, this.hp)
+    this.updateIndicators()
+  }
+
+  private updateIndicators(): void {
+    this.bar.update(this.sprite.x, this.progression.healthBarY, this.hp, this.progression.maxHealth)
+    this.progression.update()
   }
 
   private updateRanged(time: number, player: Bounds, bus: Bounds, allies: FriendlyTarget[],
@@ -245,10 +260,12 @@ export class Enemy implements HostileTarget {
       this.sprite.play(enemyActions.Walk.key, true)
     }
   }
-  takeDamage(amount: number): void {
+  takeDamage(amount: number, credit?: KillCredit): void {
     if (this.hp <= 0) return
     this.hp = Math.max(0, this.hp - amount)
     if (this.hp === 0) {
+      credit?.recordKill()
+      this.progression.destroy()
       this.sprite.setVelocity(0).disableBody()
       this.bar.destroy()
       this.sprite.clearTint().play(enemyActions.Die.key)
@@ -277,6 +294,7 @@ export class Boss implements HostileTarget {
   private finalRainUsed = false
   private finalRainStarted = false
   private shouldStartFinalRain = false
+  private defeatCredit?: KillCredit
   private volleyMultiplier = 1
   private lockCommittedToPlayer = false
   private lockStartedAt = 0
@@ -479,10 +497,11 @@ export class Boss implements HostileTarget {
     return 1
   }
 
-  takeDamage(amount: number): void {
+  takeDamage(amount: number, credit?: KillCredit): void {
     if (!this.combatActive) return
     this.hp = Math.max(0, this.hp - amount)
     if (this.hp === 0) {
+      this.defeatCredit = credit
       this.shouldStartFinalRain = !this.finalRainUsed
       if (this.shouldStartFinalRain) this.finalRainUsed = true
       this.lifePhase = 'vanishing'
@@ -514,12 +533,15 @@ export class Boss implements HostileTarget {
       return
     }
     this.lifePhase = 'appearing'
+    this.defeatCredit = undefined
     this.sprite.enableBody(false, this.sprite.x, this.sprite.y, true, true)
       .setVelocity(0).setVisible(true).play(enemyActions.Appear.key)
   }
 
   private finishDefeat(): void {
     this.lifePhase = 'defeated'
+    this.defeatCredit?.recordKill()
+    this.defeatCredit = undefined
     this.warning.destroy()
     this.bar.destroy()
     this.sprite.destroy()
@@ -536,6 +558,7 @@ const ALLY_TINT = 0x8f969f
 export class AllyUnit implements FriendlyTarget {
   readonly sprite: Phaser.Physics.Arcade.Sprite
   readonly bar: HealthBar
+  readonly progression: UnitProgression
   hp = combatConfig.enemyHealth
   private target: HostileTarget | null = null
   private hitAt = 0
@@ -552,14 +575,17 @@ export class AllyUnit implements FriendlyTarget {
     this.sprite.setSize(16, 38).setOffset(40, 46)
     this.sprite.setData('ally', this)
     this.bar = new HealthBar(scene, 48, this.hp, kind === 'melee' ? '友軍近戰' : '友軍遠攻', 0xaab2bd)
+    this.progression = new UnitProgression(scene, this, combatConfig.enemyHealth)
     this.sprite.play(avatarActions.Run.key)
   }
+
+  get attackDamage(): number { return this.progression.scaleDamage(combatConfig.enemyDamage) }
 
   update(time: number, enemies: HostileTarget[], launch: (ally: AllyUnit, target: Bounds) => void): void {
     if (this.hp <= 0) return
     if (this.kind === 'ranged') {
       this.updateRanged(time, enemies, launch)
-      this.bar.update(this.sprite.x, this.sprite.y - 87, this.hp)
+      this.updateIndicators()
       return
     }
     const body = this.sprite.body as Phaser.Physics.Arcade.Body
@@ -570,7 +596,7 @@ export class AllyUnit implements FriendlyTarget {
       this.sprite.setVelocityX(0)
       if (!this.hitApplied && time >= this.hitAt) {
         this.hitApplied = true
-        if (inRange(this.target)) this.target.takeDamage(combatConfig.enemyDamage)
+        if (inRange(this.target)) this.target.takeDamage(this.attackDamage, this.progression)
       }
       if (time >= this.finishAt) this.target = null
     } else {
@@ -591,7 +617,12 @@ export class AllyUnit implements FriendlyTarget {
         this.sprite.play(avatarActions.Run.key, true)
       }
     }
-    this.bar.update(this.sprite.x, this.sprite.y - 87, this.hp)
+    this.updateIndicators()
+  }
+
+  private updateIndicators(): void {
+    this.bar.update(this.sprite.x, this.progression.healthBarY, this.hp, this.progression.maxHealth)
+    this.progression.update()
   }
 
   private updateRanged(time: number, enemies: HostileTarget[],
@@ -627,10 +658,12 @@ export class AllyUnit implements FriendlyTarget {
     }
   }
 
-  takeDamage(amount: number): void {
+  takeDamage(amount: number, credit?: KillCredit): void {
     if (this.hp <= 0) return
     this.hp = Math.max(0, this.hp - amount)
     if (this.hp === 0) {
+      credit?.recordKill()
+      this.progression.destroy()
       this.sprite.setVelocity(0).disableBody()
       this.bar.destroy()
       this.sprite.setTint(ALLY_TINT).play(avatarActions.Die.key)
