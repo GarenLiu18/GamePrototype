@@ -31,6 +31,11 @@ export const avatarActions = {
     'ThrowUnderarm01', 'ThrowUnderarm02', 'ThrowUnderarm03',
     'ThrowUnderarm04', 'ThrowUnderarm05', 'ThrowUnderarm06',
   ], false, 10),
+  GroundSlam: action('Combat/GroundSlam', [
+    'GroundSlam04', 'GroundSlam05', 'GroundSlam06', 'GroundSlam07',
+    'GroundSlam08', 'GroundSlam09', 'GroundSlam10',
+  ], false, 12),
+  Struggle: action('Fishing/Struggle', ['Struggle01', 'Struggle02', 'Struggle03'], true, 10),
   PushIdle: action('PushIdle', [
     'PushIdle01', 'PushIdle02', 'PushIdle03', 'PushIdle04', 'PushIdle05', 'PushIdle06',
   ], true, 10),

@@ -15,10 +15,9 @@ const COYOTE_MS = 100
 const JUMP_BUFFER_MS = 120
 const DROP_THROUGH_MS = 300
 const DROP_THROUGH_SPEED = 120
-// Four ground steps (roughly 32px each) is close enough for a soul to seek the player.
-const SOUL_ATTRACTION_RANGE = 128
-const SOUL_ATTRACTION_SPEED = 620
-const SOUL_PICKUP_DISTANCE = 24
+// Six ground steps (roughly 32px each) is close enough for a soul to seek the player.
+const SOUL_ATTRACTION_RANGE = 192
+const SOUL_ABSORB_DURATION = 1000
 const BULLET_SPEED = 760
 const BULLET_LIFETIME_MS = 1400
 const HEAL_RANGE = 320
@@ -26,6 +25,10 @@ const HEAL_AMOUNT = 10
 // The wave is three times faster than its previous 2x-arrow implementation.
 const HEAL_WAVE_SPEED_MULTIPLIER = 6
 const HEAL_WAVE_LIFETIME_MS = 1200
+// A fully enraged boss volley fires 30 arrows for 10 damage each. Keep one
+// arrow of buffer so that the last blocked arrow does not cause a guard break.
+const TANK_GUARD_MAX = combatConfig.boss.volleySize * 3 * combatConfig.enemyDamage + combatConfig.enemyDamage
+const TANK_GUARD_RECOVERY_PER_SECOND = 64
 const PROFESSION_MENU_TIME_SCALE = 0.1
 const CAMERA_FORWARD_FOCUS = 170
 const CAMERA_FOCUS_TRANSITION_DURATION = 700
@@ -40,9 +43,11 @@ type Soul = {
   combatAdvance: number
   progression?: UnitProgressionState
   collected: boolean
+  groundX: number
+  groundY: number
+  absorbStartedAt?: number
+  absorbDuration?: number
 }
-
-type AllySpawnRequest = Pick<Soul, 'kind' | 'combatAdvance' | 'progression'>
 
 type TouchControl = 'left' | 'right' | 'up' | 'down' | 'jump' | 'fire' | 'banner' | 'profession'
 type Profession = 'gunner' | 'healer' | 'tank'
@@ -63,8 +68,9 @@ type FullscreenTarget = HTMLElement & {
 
 class PrototypeScene extends Phaser.Scene {
   private player!: Phaser.Physics.Arcade.Sprite
+  private soulRangeIndicator!: Phaser.GameObjects.Arc
   private cursors!: Phaser.Types.Input.Keyboard.CursorKeys
-  private keys!: Record<'A' | 'D' | 'W' | 'S' | 'R' | 'E' | 'Q', Phaser.Input.Keyboard.Key>
+  private keys!: Record<'A' | 'D' | 'W' | 'S' | 'R' | 'E' | 'Q' | 'X', Phaser.Input.Keyboard.Key>
   private enterKey!: Phaser.Input.Keyboard.Key
   private layers: { sprite: Phaser.GameObjects.TileSprite; speed: number }[] = []
   private healthText!: Phaser.GameObjects.Text
@@ -95,13 +101,15 @@ class PrototypeScene extends Phaser.Scene {
   private enemySpawnCenter = combatConfig.waveCluster.enemyCenter
   private allyBanner!: Phaser.GameObjects.Container
   private bannerPrompt!: Phaser.GameObjects.Text
-  private bannerHeld = false
-  private pendingAllySpawns: AllySpawnRequest[] = []
   private souls: Soul[] = []
+  private soulsBeingAbsorbed = new Set<Soul>()
+  private soulAbsorbFlashStartedAt = 0
+  private soulAbsorbFlashUntil = 0
   private allySpawnSerial = 0
   private playerHp = combatConfig.playerHealth
   private busHp = combatConfig.busHealth
   private playerBar!: HealthBar
+  private tankGuardBar!: HealthBar
   private busBar!: HealthBar
   private invulnerableUntil = 0
   private hurt = false
@@ -126,6 +134,9 @@ class PrototypeScene extends Phaser.Scene {
   private playerAmmo = 3
   private profession: Profession = 'gunner'
   private blocking = false
+  private tankGuard = TANK_GUARD_MAX
+  private deployingBanner = false
+  private playerUsingStrugglePose = false
   private primaryActionPointerId: number | null = null
   private professionMenu?: Phaser.GameObjects.Container
   private professionMenuSelection = 0
@@ -166,9 +177,10 @@ class PrototypeScene extends Phaser.Scene {
     this.nextWaveAt = null
     this.pendingEnemyReinforcements = []
     this.enemySpawnCenter = combatConfig.waveCluster.enemyCenter
-    this.bannerHeld = false
-    this.pendingAllySpawns = []
     this.souls = []
+    this.soulsBeingAbsorbed.clear()
+    this.soulAbsorbFlashStartedAt = 0
+    this.soulAbsorbFlashUntil = 0
     this.allySpawnSerial = 0
     this.physics.resume()
     this.firing = false
@@ -176,6 +188,9 @@ class PrototypeScene extends Phaser.Scene {
     this.playerAmmo = 3
     this.profession = 'gunner'
     this.blocking = false
+    this.tankGuard = TANK_GUARD_MAX
+    this.deployingBanner = false
+    this.playerUsingStrugglePose = false
     this.primaryActionPointerId = null
     this.professionMenu?.destroy()
     this.professionMenu = undefined
@@ -234,6 +249,8 @@ class PrototypeScene extends Phaser.Scene {
     // Inspected frames are 96 x 84 with transparent padding above the character.
     this.player.setSize(16, 38).setOffset(40, 46)
     this.player.setMaxVelocity(SPEED, 900)
+    this.soulRangeIndicator = this.add.circle(this.player.x, this.player.y - 10, SOUL_ATTRACTION_RANGE, 0x8fe4dc, 0.06)
+      .setStrokeStyle(1, 0x8fe4dc, 0.18).setDepth(1)
     this.physics.add.collider(this.player, groundSolids)
     this.physics.add.collider(this.player, this.oneWayPlatforms, undefined, (_player, platform) => {
       if (this.time.now < this.dropThroughUntil) return false
@@ -246,6 +263,8 @@ class PrototypeScene extends Phaser.Scene {
     this.physics.add.existing(this.bus, true)
     this.createAllyBanner()
     this.playerBar = new HealthBar(this, 54, combatConfig.playerHealth, '玩家', 0xa0e6da)
+    this.tankGuardBar = new HealthBar(this, 54, TANK_GUARD_MAX, '體幹', 0x7cb7ff)
+    this.tankGuardBar.setVisible(false)
     this.busBar = new HealthBar(this, 180, combatConfig.busHealth, '守護巴士', 0x7cb7ff)
     this.allyGroup = this.physics.add.group()
     this.enemyGroup = this.physics.add.group()
@@ -384,6 +403,7 @@ class PrototypeScene extends Phaser.Scene {
         this.hurt = false
         if (this.profession === 'gunner' && this.playerAmmo === 0) this.startReload()
       }
+      if (animation.key === avatarActions.GroundSlam.key) this.deployingBanner = false
     })
     this.input.on('pointerdown', this.onPointerDown, this)
     this.input.on('pointerup', this.onPointerUp, this)
@@ -395,7 +415,7 @@ class PrototypeScene extends Phaser.Scene {
     })
     this.playAction('Idle')
     this.cursors = this.input.keyboard!.createCursorKeys()
-    this.keys = this.input.keyboard!.addKeys('A,D,W,S,R,E,Q') as typeof this.keys
+    this.keys = this.input.keyboard!.addKeys('A,D,W,S,R,E,Q,X') as typeof this.keys
     this.enterKey = this.input.keyboard!.addKey(Phaser.Input.Keyboard.KeyCodes.ENTER)
     this.input.keyboard!.addCapture(['SPACE', 'UP', 'DOWN', 'LEFT', 'RIGHT'])
     const camera = this.cameras.main
@@ -518,7 +538,7 @@ class PrototypeScene extends Phaser.Scene {
     hud.add(this.healthText)
     hud.add(text(925, 48, '敵軍紅／金 · 友軍灰 · 雙方近戰與遠攻', 11, '#8ca3bc').setOrigin(1, 0))
     hud.add(this.add.rectangle(480, 521, 960, 38, 0x090f20, 0.95))
-    hud.add(text(24, 511, 'A D / ← → 移動    SPACE / W / ↑ 跳躍    E 旗幟    Q / △ 選擇    ○ / 滑鼠左鍵 行動    R 重來', 12, '#b0c2d6'))
+    hud.add(text(24, 511, 'A D / ← → 移動    SPACE / W / ↑ 跳躍    E 旗幟    X 吸魂    Q / △ 選擇    ○ / 滑鼠左鍵 行動    R 重來', 12, '#b0c2d6'))
     this.professionText = text(560, 511, '', 12, '#a0e6da').setOrigin(1, 0)
     hud.add(this.professionText)
     this.ammoText = text(705, 511, '', 12, '#a0e6da').setOrigin(1, 0)
@@ -624,12 +644,23 @@ class PrototypeScene extends Phaser.Scene {
     return [...this.touchControlPointers.values()].includes(control)
   }
 
-  private updateBlocking(): void {
+  private updateBlocking(delta: number): void {
+    const guardInputHeld = this.tankGuardInputHeld()
     this.blocking = this.profession === 'tank' && !this.professionMenuOpen && !this.hurt
-      && (this.touchControlIsDown('fire') || this.primaryActionPointerId !== null)
-    if (!this.blocking) return
+      && guardInputHeld
+    if (!this.blocking) {
+      if (this.profession === 'tank' && !guardInputHeld) {
+        this.tankGuard = Math.min(TANK_GUARD_MAX,
+          this.tankGuard + TANK_GUARD_RECOVERY_PER_SECOND * delta / 1000)
+      }
+      return
+    }
     this.player.setVelocityX(0)
     this.playAction('PushIdle')
+  }
+
+  private tankGuardInputHeld(): boolean {
+    return this.touchControlIsDown('fire') || this.primaryActionPointerId !== null
   }
 
   private get professionMenuOpen(): boolean {
@@ -744,6 +775,13 @@ class PrototypeScene extends Phaser.Scene {
   }
 
   private playAction(action: keyof typeof avatarActions): void {
+    const usingStrugglePose = action === 'Struggle'
+    if (this.playerUsingStrugglePose !== usingStrugglePose) {
+      // Struggle frames are 143 x 104, whereas the normal avatar frames are
+      // 96 x 84. Keep the shared 16 x 38 physics body planted at the feet.
+      this.player.setOffset(usingStrugglePose ? 64 : 40, usingStrugglePose ? 66 : 46)
+      this.playerUsingStrugglePose = usingStrugglePose
+    }
     this.player.play(avatarActions[action].key, true)
   }
 
@@ -773,9 +811,6 @@ class PrototypeScene extends Phaser.Scene {
     for (const { kind, x, combatAdvance } of this.createWaveCluster(this.enemySpawnCenter, reinforcements)) {
       this.spawnEnemy(kind, x, combatAdvance)
     }
-    // Carrying the banner deliberately holds recovered allies, but must not
-    // delay the scheduled enemy wave that has just spawned.
-    if (!this.bannerHeld) this.releasePendingAllies()
   }
 
   private createWaveCluster(centerX: number, reinforcements: EnemyKind[] = []): { kind: EnemyKind; x: number; combatAdvance: number }[] {
@@ -812,27 +847,9 @@ class PrototypeScene extends Phaser.Scene {
 
   private spawnAllyFromBanner(kind: EnemyKind, combatAdvance: number,
     progression?: UnitProgressionState): void {
-    if (this.bannerHeld) {
-      this.pendingAllySpawns.push({ kind, combatAdvance, progression })
-      return
-    }
     const offset = ((this.allySpawnSerial++ % 5) - 2) * 30
     const x = Phaser.Math.Clamp(this.allyBanner.x + offset, 40, WORLD_WIDTH - 40)
     this.spawnAlly(kind, x, combatAdvance, progression)
-  }
-
-  private releasePendingAllies(): void {
-    const requests = this.pendingAllySpawns.splice(0)
-    const middle = (requests.length - 1) / 2
-    Phaser.Utils.Array.Shuffle(requests)
-    for (const [index, request] of requests.entries()) {
-      const x = Phaser.Math.Clamp(
-        this.allyBanner.x + (index - middle) * combatConfig.waveCluster.spacing
-          + Phaser.Math.Between(-combatConfig.waveCluster.jitter, combatConfig.waveCluster.jitter),
-        40, WORLD_WIDTH - 40,
-      )
-      this.spawnAlly(request.kind, x, request.combatAdvance, request.progression)
-    }
   }
 
   private createAllyBanner(): void {
@@ -851,28 +868,17 @@ class PrototypeScene extends Phaser.Scene {
   }
 
   private updateAllyBanner(): void {
-    if (this.bannerHeld) {
-      const direction = this.player.flipX ? -1 : 1
-      this.allyBanner.setPosition(this.player.x - direction * 24, this.player.y)
-    }
-    const nearby = Phaser.Math.Distance.Between(this.player.x, this.player.y, this.allyBanner.x, this.allyBanner.y) <= 72
-    const body = this.player.body as Phaser.Physics.Arcade.Body
-    const standingOnGround = this.player.y >= GROUND_Y - 4 && (body.blocked.down || body.touching.down)
     const activateBanner = Phaser.Input.Keyboard.JustDown(this.keys.E) || this.bannerActionQueued
     this.bannerActionQueued = false
-    if (activateBanner) {
-      if (this.bannerHeld && standingOnGround) {
-        this.bannerHeld = false
-        this.allyBanner.setPosition(Phaser.Math.Clamp(this.player.x, 40, WORLD_WIDTH - 40), GROUND_Y)
-        this.releasePendingAllies()
-      } else if (!this.bannerHeld && nearby) {
-        this.bannerHeld = true
-      }
+    if (activateBanner && !this.deployingBanner && !this.hurt && !this.firing && !this.reloading && !this.blocking) {
+      // The banner is redeployed directly at the player, including their
+      // current platform height; no proximity pickup is required.
+      this.allyBanner.setPosition(Phaser.Math.Clamp(this.player.x, 40, WORLD_WIDTH - 40), this.player.y)
+      this.deployingBanner = true
+      this.player.setVelocityX(0)
+      this.playAction('GroundSlam')
     }
-    const prompt = this.bannerHeld
-      ? standingOnGround ? 'E: place ally banner' : 'Land on the ground to place banner'
-      : nearby ? 'E: pick up ally banner' : 'Ally banner'
-    this.bannerPrompt.setText(prompt).setPosition(this.allyBanner.x, this.allyBanner.y - 110)
+    this.bannerPrompt.setText('E: deploy ally banner').setPosition(this.allyBanner.x, this.allyBanner.y - 110)
   }
 
   private createSoul(death: UnitDeath): void {
@@ -886,9 +892,11 @@ class PrototypeScene extends Phaser.Scene {
     this.physics.add.existing(marker)
     const body = marker.body as Phaser.Physics.Arcade.Body
     body.setAllowGravity(false).setImmovable(true).setSize(22, 22)
-    const soul: Soul = { marker, caption, ...death, collected: false }
+    const soul: Soul = {
+      marker, caption, ...death, collected: false,
+      groundX: death.x, groundY: GROUND_Y - 10,
+    }
     this.souls.push(soul)
-    this.physics.add.overlap(this.player, marker, () => this.collectSoul(soul, 'player'))
     // Enemies may only claim fallen allies. Their reward is delayed until the
     // next scheduled wave, so no combatant is created at the pickup point.
     if (death.faction === 'ally') {
@@ -899,12 +907,14 @@ class PrototypeScene extends Phaser.Scene {
 
   private collectSoul(soul: Soul, collector: 'player' | 'enemy'): void {
     if (soul.collected || !soul.marker.active || this.gameEnded) return
+    this.soulsBeingAbsorbed.delete(soul)
     soul.collected = true
     this.tweens.killTweensOf([soul.marker, soul.caption])
     soul.marker.destroy()
     soul.caption.destroy()
     this.souls = this.souls.filter(candidate => candidate !== soul)
     if (collector === 'player') {
+      this.flashPlayerAfterSoulAbsorb()
       if (soul.faction === 'ally' && soul.progression) {
         this.spawnAllyFromBanner(soul.kind, soul.combatAdvance, soul.progression)
       } else if (soul.faction === 'enemy') {
@@ -915,28 +925,71 @@ class PrototypeScene extends Phaser.Scene {
     this.pendingEnemyReinforcements.push(soul.kind)
   }
 
-  private updateSoulAttraction(delta: number): void {
+  private updateSoulAbsorption(time: number): void {
     const targetX = this.player.x
-    // Aim at the player's pickup hitbox near their feet, rather than the
-    // sprite centre, so attracted souls do not appear to float into the air.
-    const targetY = this.player.y - 10
-    const maxDistance = SOUL_ATTRACTION_SPEED * delta / 1000
+    const targetY = this.player.y - 58
+    const holdingAbsorb = this.keys.X.isDown && !this.firing && !this.reloading
+      && !this.deployingBanner && !this.blocking && !this.hurt
+    if (!holdingAbsorb) {
+      this.cancelSoulAbsorption()
+      return
+    }
+    // The player still performs the channel animation when no soul is within
+    // range, making the X input's feedback consistent.
+    this.player.setVelocityX(0)
+    this.playAction('Struggle')
 
-    for (const soul of [...this.souls]) {
-      if (soul.collected || !soul.marker.active) continue
+    const candidates = this.souls
+      .filter(soul => !soul.collected && soul.marker.active
+        && Phaser.Math.Distance.Between(soul.groundX, soul.groundY, targetX, targetY) <= SOUL_ATTRACTION_RANGE)
+    for (const soul of candidates) {
+      if (this.soulsBeingAbsorbed.has(soul)) continue
+      const distance = Phaser.Math.Distance.Between(soul.groundX, soul.groundY, targetX, targetY)
+      soul.absorbStartedAt = time
+      soul.absorbDuration = Phaser.Math.Linear(250, SOUL_ABSORB_DURATION, distance / SOUL_ATTRACTION_RANGE)
+      soul.caption.setText('吸取 0%')
+      this.soulsBeingAbsorbed.add(soul)
+    }
 
-      const distance = Phaser.Math.Distance.Between(soul.marker.x, soul.marker.y, targetX, targetY)
-      if (distance > SOUL_ATTRACTION_RANGE) continue
-      if (distance <= SOUL_PICKUP_DISTANCE) {
-        this.collectSoul(soul, 'player')
+    for (const soul of [...this.soulsBeingAbsorbed]) {
+      const distance = Phaser.Math.Distance.Between(soul.groundX, soul.groundY, targetX, targetY)
+      if (soul.collected || !soul.marker.active || distance > SOUL_ATTRACTION_RANGE) {
+        this.cancelSoulAbsorption(false, soul)
         continue
       }
-
-      const travel = Math.min(maxDistance, distance - SOUL_PICKUP_DISTANCE)
-      soul.marker.x += (targetX - soul.marker.x) / distance * travel
-      soul.marker.y += (targetY - soul.marker.y) / distance * travel
+      const progress = Phaser.Math.Clamp((time - soul.absorbStartedAt!) / soul.absorbDuration!, 0, 1)
+      soul.marker.setPosition(
+        Phaser.Math.Linear(soul.groundX, targetX, progress),
+        Phaser.Math.Linear(soul.groundY, targetY, progress),
+      ).setScale(1 + progress * 0.15)
       soul.caption.setPosition(soul.marker.x, soul.marker.y - 29)
+        .setText(`吸取 ${Math.ceil(progress * 100)}%`)
       ;(soul.marker.body as Phaser.Physics.Arcade.Body).updateFromGameObject()
+      if (progress >= 1) this.collectSoul(soul, 'player')
+    }
+  }
+
+  private flashPlayerAfterSoulAbsorb(): void {
+    this.soulAbsorbFlashStartedAt = this.time.now
+    this.soulAbsorbFlashUntil = this.time.now + 360
+  }
+
+  private cancelSoulAbsorption(bounce = false, onlySoul?: Soul): void {
+    const souls = onlySoul ? [onlySoul] : [...this.soulsBeingAbsorbed]
+    for (const soul of souls) {
+      this.soulsBeingAbsorbed.delete(soul)
+      soul.absorbStartedAt = undefined
+      soul.absorbDuration = undefined
+      if (soul.collected || !soul.marker.active) continue
+
+      soul.marker.setPosition(soul.groundX, soul.groundY).setScale(1)
+      soul.caption.setPosition(soul.groundX, soul.groundY - 29)
+        .setText(soul.faction === 'ally' ? 'ALLY SOUL' : 'ENEMY SOUL')
+      ;(soul.marker.body as Phaser.Physics.Arcade.Body).updateFromGameObject()
+      if (bounce) {
+        this.tweens.add({ targets: soul.marker, y: soul.groundY - 18, duration: 120, yoyo: true, ease: 'Quad.Out' })
+        this.tweens.add({ targets: soul.caption, y: soul.groundY - 47, duration: 120, yoyo: true, ease: 'Quad.Out' })
+      }
     }
   }
 
@@ -1278,7 +1331,10 @@ class PrototypeScene extends Phaser.Scene {
     credit?: KillCredit): void {
     if (this.gameEnded) return
     if (target === 'player') {
-      if (this.blocking) return
+      this.cancelSoulAbsorption(true)
+      if (this.blocking && this.absorbTankGuard(amount)) {
+        return
+      }
       if (this.time.now < this.invulnerableUntil) return
       this.playerHp = Math.max(0, this.playerHp - amount)
       if (this.playerHp === 0) credit?.recordKill()
@@ -1287,6 +1343,7 @@ class PrototypeScene extends Phaser.Scene {
       this.hurt = true
       this.firing = false
       this.reloading = false
+      this.deployingBanner = false
       this.lastGrounded = -Infinity
       this.jumpQueued = -Infinity
       this.jumpReleased = true
@@ -1294,7 +1351,7 @@ class PrototypeScene extends Phaser.Scene {
       this.player.setFlipX(direction > 0).setAlpha(1)
         .setVelocity(direction * combatConfig.playerKnockbackSpeed, -combatConfig.playerKnockbackLift)
       this.player.setTintFill(0xf47b86)
-      this.player.play(avatarActions.Knockback.key)
+      this.playAction('Knockback')
       // No dedicated OnHit asset exists. A short procedural flash complements
       // the complete source Knockback animation without replacing any frames.
       const flash = this.add.circle(this.player.x, this.player.y - 36, 8, 0xffeee0, 0.8)
@@ -1309,6 +1366,17 @@ class PrototypeScene extends Phaser.Scene {
     if (this.playerHp === 0 || this.busHp === 0) {
       this.endEncounter(this.busHp === 0 ? '巴士已被摧毀' : '玩家已倒下')
     }
+  }
+
+  private absorbTankGuard(amount: number): boolean {
+    // A guard that reaches zero breaks on this hit: the attack goes through
+    // in full and the player must release the block before recovering guard.
+    if (this.tankGuard <= amount) {
+      this.tankGuard = 0
+      return false
+    }
+    this.tankGuard -= amount
+    return true
   }
 
   private endEncounter(message: string): void {
@@ -1343,6 +1411,8 @@ class PrototypeScene extends Phaser.Scene {
 
   private updateHealthDisplay(): void {
     this.playerBar.update(this.player.x, this.player.y - 79, this.playerHp)
+    this.tankGuardBar.update(this.player.x, this.player.y - 62, Math.ceil(this.tankGuard))
+    this.tankGuardBar.setVisible(this.profession === 'tank')
     this.busBar.update(this.bus.x, this.bus.y - this.bus.displayHeight - 17, this.busHp)
     const melee = this.enemies.filter(enemy => enemy.hp > 0 && enemy.kind === 'melee').length
     const ranged = this.enemies.filter(enemy => enemy.hp > 0 && enemy.kind === 'ranged').length
@@ -1352,7 +1422,11 @@ class PrototypeScene extends Phaser.Scene {
     this.professionText.setColor(tank ? '#7cb7ff' : healing ? '#72e7c6' : '#f47b86')
       .setText(professionNames[this.profession])
     this.ammoText.setColor(tank ? '#7cb7ff' : healing ? '#72e7c6' : this.reloading ? '#ffc477' : '#a0e6da')
-      .setText(tank ? this.blocking ? '格擋中 · 無敵' : '按住 ○ 格擋' : healing
+      .setText(tank ? this.blocking
+        ? `格擋中 · 體幹 ${Math.ceil(this.tankGuard)} / ${TANK_GUARD_MAX}`
+        : this.tankGuardInputHeld()
+          ? `體幹破裂 · 體幹 ${Math.ceil(this.tankGuard)} / ${TANK_GUARD_MAX}`
+          : `鬆開回復 · 體幹 ${Math.ceil(this.tankGuard)} / ${TANK_GUARD_MAX}` : healing
         ? `治療 +${HEAL_AMOUNT} · 範圍 ${HEAL_RANGE}` : this.reloading ? '換彈中…' : `彈藥 ${this.playerAmmo} / 3`)
   }
 
@@ -1456,14 +1530,20 @@ class PrototypeScene extends Phaser.Scene {
       if (Phaser.Input.Keyboard.JustDown(this.cursors.space)
         || Phaser.Input.Keyboard.JustDown(this.enterKey)) this.selectProfessionBySelection()
     }
-    this.updateBlocking()
+    this.updateBlocking(gameplayDelta)
     if (!this.gameEnded && !controlsLocked) this.updateAllyBanner()
     this.updateHealthDisplay()
     this.updateBossHud()
     this.updateMinimap()
     if (this.gameEnded) return
+    this.soulRangeIndicator.setPosition(this.player.x, this.player.y - 10)
     const invulnerable = time < this.invulnerableUntil
-    this.player.setAlpha(invulnerable && Math.floor((time - this.hitStartedAt) / combatConfig.playerBlinkInterval) % 2 === 1 ? 0.25 : 1)
+    const absorbFlashing = time < this.soulAbsorbFlashUntil
+      && Math.floor((time - this.soulAbsorbFlashStartedAt) / 60) % 2 === 0
+    this.player.setAlpha(
+      (invulnerable && Math.floor((time - this.hitStartedAt) / combatConfig.playerBlinkInterval) % 2 === 1) || absorbFlashing
+        ? 0.25 : 1,
+    )
     if (!invulnerable || time - this.hitStartedAt >= 100) this.player.clearTint()
     if (this.player.y > 590) {
       this.playerHp = 0
@@ -1473,18 +1553,18 @@ class PrototypeScene extends Phaser.Scene {
     const body = this.player.body as Phaser.Physics.Arcade.Body
     let grounded = body.blocked.down || body.touching.down
     if (grounded && !this.hurt) this.lastGrounded = time
-    const left = !controlsLocked && !this.blocking
+    const left = !controlsLocked && !this.blocking && !this.deployingBanner && this.soulsBeingAbsorbed.size === 0
       && (this.cursors.left.isDown || this.keys.A.isDown || this.touchControlIsDown('left'))
-    const right = !controlsLocked && !this.blocking
+    const right = !controlsLocked && !this.blocking && !this.deployingBanner && this.soulsBeingAbsorbed.size === 0
       && (this.cursors.right.isDown || this.keys.D.isDown || this.touchControlIsDown('right'))
     const direction = Number(right) - Number(left)
     if (!this.hurt) {
       this.player.setVelocityX(direction * SPEED)
       if (direction) this.player.setFlipX(direction < 0)
     }
-    this.updateSoulAttraction(gameplayDelta)
+    this.updateSoulAbsorption(time)
     this.updateCameraFocus(gameplayDelta, direction)
-    if (!controlsLocked && !this.blocking && !this.hurt && grounded && this.player.y < GROUND_Y - 8
+    if (!controlsLocked && !this.blocking && !this.deployingBanner && this.soulsBeingAbsorbed.size === 0 && !this.hurt && grounded && this.player.y < GROUND_Y - 8
       && Phaser.Input.Keyboard.JustDown(this.cursors.down)) {
       this.dropThroughUntil = time + DROP_THROUGH_MS
       this.player.y += 4
@@ -1495,23 +1575,23 @@ class PrototypeScene extends Phaser.Scene {
     // Read every edge, including simultaneous keys, to avoid stale jump requests.
     const jumpEdges = [this.cursors.space, this.cursors.up, this.keys.W]
       .map(key => Phaser.Input.Keyboard.JustDown(key))
-    if (!controlsLocked && !this.blocking && !this.hurt && jumpEdges.some(Boolean)) this.jumpQueued = time
-    const jumpHeld = !controlsLocked && !this.blocking && (this.cursors.space.isDown || this.cursors.up.isDown || this.keys.W.isDown
+    if (!controlsLocked && !this.blocking && !this.deployingBanner && this.soulsBeingAbsorbed.size === 0 && !this.hurt && jumpEdges.some(Boolean)) this.jumpQueued = time
+    const jumpHeld = !controlsLocked && !this.blocking && !this.deployingBanner && this.soulsBeingAbsorbed.size === 0 && (this.cursors.space.isDown || this.cursors.up.isDown || this.keys.W.isDown
       || this.touchControlIsDown('jump')
     )
-    if (!this.blocking && !this.hurt && time - this.jumpQueued <= JUMP_BUFFER_MS && time - this.lastGrounded <= COYOTE_MS) {
+    if (!this.blocking && !this.deployingBanner && this.soulsBeingAbsorbed.size === 0 && !this.hurt && time - this.jumpQueued <= JUMP_BUFFER_MS && time - this.lastGrounded <= COYOTE_MS) {
       this.player.setVelocityY(-JUMP_SPEED)
       this.lastGrounded = -Infinity
       this.jumpQueued = -Infinity
       this.jumpReleased = false
     }
     // Releasing early produces a shorter jump.
-    if (!this.blocking && !this.hurt && !jumpHeld && !this.jumpReleased && body.velocity.y < -240) {
+    if (!this.blocking && !this.deployingBanner && this.soulsBeingAbsorbed.size === 0 && !this.hurt && !jumpHeld && !this.jumpReleased && body.velocity.y < -240) {
       this.player.setVelocityY(-240)
       this.jumpReleased = true
     }
     // Shooting owns the animation temporarily, while movement physics continue.
-    if (!this.firing && !this.reloading && !this.hurt && !this.blocking) {
+    if (!this.firing && !this.reloading && !this.hurt && !this.blocking && !this.deployingBanner && this.soulsBeingAbsorbed.size === 0) {
       if (body.velocity.y < -80) this.playAction('JumpRise')
       else if (!grounded && body.velocity.y > 80) this.playAction('JumpFall')
       else if (!grounded) this.playAction('JumpMid')
@@ -1591,15 +1671,9 @@ class PrototypeScene extends Phaser.Scene {
       const allyMelee = this.allies.filter(ally => ally.hp > 0 && ally.kind === 'melee').length
       const allyRanged = this.allies.filter(ally => ally.hp > 0 && ally.kind === 'ranged').length
       if (time >= this.nextWaveAt) this.spawnWave()
-      if (this.bannerHeld) {
-        const seconds = Math.max(0, Math.ceil((this.nextWaveAt - time) / 1000))
-        const queued = this.pendingEnemyReinforcements.length
-        this.stateText.setText(`旗幟攜帶中 · 友軍排隊 ${this.pendingAllySpawns.length} · 敵軍下一波 ${seconds} 秒${queued ? ` · 敵援 +${queued}` : ''}`)
-      } else {
-        const seconds = Math.max(0, Math.ceil((this.nextWaveAt - time) / 1000))
-        const queued = this.pendingEnemyReinforcements.length
-        this.stateText.setText(`第 ${this.wave} 波 · 友軍 ${allyMelee}/${allyRanged} · 下一波 ${seconds} 秒${queued ? ` · 敵援 +${queued}` : ''}`)
-      }
+      const seconds = Math.max(0, Math.ceil((this.nextWaveAt - time) / 1000))
+      const queued = this.pendingEnemyReinforcements.length
+      this.stateText.setText(`第 ${this.wave} 波 · 友軍 ${allyMelee}/${allyRanged} · 下一波 ${seconds} 秒${queued ? ` · 敵援 +${queued}` : ''}`)
     }
     this.updateHealthDisplay()
   }
