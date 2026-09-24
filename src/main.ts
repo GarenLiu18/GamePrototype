@@ -1,6 +1,6 @@
 import Phaser from 'phaser'
 import { allyArrowTexture, avatarActions, backgrounds, bulletAction, busTexture, enemyProjectileAction, loadAssets, registerAnimations } from './assets'
-import { AllyUnit, ballisticVelocity, Boss, combatConfig, createCombatAdvances, Enemy, HealthBar, type Bounds, type EnemyKind, type EnemyTarget, type HostileTarget, type UnitDeath } from './combat'
+import { AllyUnit, AmmoSlots, ballisticVelocity, Boss, combatConfig, createCombatAdvances, Enemy, HealthBar, type Bounds, type EnemyKind, type EnemyTarget, type HostileTarget, type UnitDeath } from './combat'
 import type { KillCredit, UnitProgressionState } from './unit-progression'
 import './style.css'
 
@@ -110,6 +110,7 @@ class PrototypeScene extends Phaser.Scene {
   private busHp = combatConfig.busHealth
   private playerBar!: HealthBar
   private tankGuardBar!: HealthBar
+  private ammoSlots!: AmmoSlots
   private busBar!: HealthBar
   private invulnerableUntil = 0
   private hurt = false
@@ -262,9 +263,11 @@ class PrototypeScene extends Phaser.Scene {
     this.bus = this.add.image(180, GROUND_Y, busTexture, 'vehicle').setOrigin(0.5, 1).setScale(2).setDepth(2)
     this.physics.add.existing(this.bus, true)
     this.createAllyBanner()
-    this.playerBar = new HealthBar(this, 54, combatConfig.playerHealth, '玩家', 0xa0e6da)
-    this.tankGuardBar = new HealthBar(this, 54, TANK_GUARD_MAX, '體幹', 0x7cb7ff)
+    this.playerBar = new HealthBar(this, 54, combatConfig.playerHealth, professionNames[this.profession], 0xa0e6da, '#ff4d6d')
+    this.tankGuardBar = new HealthBar(this, 54, TANK_GUARD_MAX, '', 0x7cb7ff, undefined, false)
     this.tankGuardBar.setVisible(false)
+    this.ammoSlots = new AmmoSlots(this, 54, 3)
+    this.ammoSlots.setVisible(this.profession === 'gunner')
     this.busBar = new HealthBar(this, 180, combatConfig.busHealth, '守護巴士', 0x7cb7ff)
     this.allyGroup = this.physics.add.group()
     this.enemyGroup = this.physics.add.group()
@@ -510,9 +513,11 @@ class PrototypeScene extends Phaser.Scene {
     const text = (x: number, y: number, value: string, size: number, color: string) =>
       this.add.text(x, y, value, { fontFamily, fontSize: `${size}px`, color })
     hud.add(this.add.rectangle(480, 42, 960, 84, 0x090f20, 0.93))
-    hud.add(this.add.rectangle(26, 29, 5, 25, 0xa0e6da))
-    hud.add(text(42, 15, '夜行 / 守護巴士', 22, '#eef6ff'))
-    hud.add(text(42, 47, 'PROTOTYPE 01     ·     阻止敵人摧毀巴士', 11, '#8ca3bc'))
+    hud.add(this.add.text(26, 42, '阻止敵人摧毀巴士', {
+      fontFamily, fontSize: '18px', color: '#eef6ff', fontStyle: 'bold',
+    }).setOrigin(0, 0.5))
+
+
     this.minimapHud = this.add.container(0, 0)
     this.minimapHud.add(text(350, 18, '● 我軍', 9, '#a0e6da'))
     this.minimapHud.add(text(480, 18, '戰線地圖', 9, '#8ca3bc').setOrigin(0.5, 0))
@@ -534,12 +539,12 @@ class PrototypeScene extends Phaser.Scene {
     }).setOrigin(1, 0)
     this.bossHud.add(this.bossHudValue)
     hud.add(this.bossHud)
-    this.healthText = text(925, 21, '', 15, '#a0e6da').setOrigin(1, 0)
+    this.healthText = text(925, 21, '', 15, '#a0e6da').setOrigin(1, 0).setVisible(false)
     hud.add(this.healthText)
-    hud.add(text(925, 48, '敵軍紅／金 · 友軍灰 · 雙方近戰與遠攻', 11, '#8ca3bc').setOrigin(1, 0))
+
     hud.add(this.add.rectangle(480, 521, 960, 38, 0x090f20, 0.95))
-    hud.add(text(24, 511, 'A D / ← → 移動    SPACE / W / ↑ 跳躍    E 旗幟    X 吸魂    Q / △ 選擇    ○ / 滑鼠左鍵 行動    R 重來', 12, '#b0c2d6'))
-    this.professionText = text(560, 511, '', 12, '#a0e6da').setOrigin(1, 0)
+    hud.add(text(24, 511, 'A D / ← → 移動    SPACE / W / ↑ 跳躍    E 旗幟    X 吸魂    Q / 職 選擇    攻 / 滑鼠左鍵 行動    R 重來', 12, '#b0c2d6'))
+    this.professionText = text(560, 511, '', 12, '#a0e6da').setOrigin(1, 0).setVisible(false)
     hud.add(this.professionText)
     this.ammoText = text(705, 511, '', 12, '#a0e6da').setOrigin(1, 0)
     hud.add(this.ammoText)
@@ -561,21 +566,21 @@ class PrototypeScene extends Phaser.Scene {
         this.pressTouchControl(control, pointer)
       })
     }
-    addButton(47, 465, '◀', 'left', 0x7cb7ff)
-    addButton(131, 465, '▶', 'right', 0x7cb7ff)
-    addButton(89, 400, '▲', 'up', 0x7cb7ff)
-    addButton(89, 510, '▼', 'down', 0x7cb7ff)
-    addButton(835, 380, '△', 'profession', 0x72e7c6)
+    addButton(125, 380, '▲', 'up', 0x7cb7ff)
+    addButton(60, 435, '◀', 'left', 0x7cb7ff)
+    addButton(190, 435, '▶', 'right', 0x7cb7ff)
+    addButton(125, 490, '▼', 'down', 0x7cb7ff)
+    addButton(835, 380, '職', 'profession', 0x72e7c6)
     addButton(770, 435, '旗', 'banner', 0x71d9cf)
-    addButton(900, 435, '○', 'fire', 0xf47b86)
-    addButton(835, 490, '×', 'jump', 0xf9df84)
+    addButton(900, 435, '攻', 'fire', 0xf47b86)
+    addButton(835, 490, '跳', 'jump', 0xf9df84)
   }
 
   private createFullscreenButton(): void {
-    const button = this.add.rectangle(886, 72, 88, 24, 0x132238, 0.92)
-      .setStrokeStyle(1, 0x71d9cf, 0.9).setScrollFactor(0).setDepth(120).setInteractive()
-    this.fullscreenLabel = this.add.text(886, 72, '全螢幕', {
-      fontFamily, fontSize: '11px', color: '#d8fffa', fontStyle: 'bold',
+    const button = this.add.rectangle(846, 42, 176, 48, 0x132238, 0.92)
+      .setStrokeStyle(2, 0x71d9cf, 0.9).setScrollFactor(0).setDepth(120).setInteractive()
+    this.fullscreenLabel = this.add.text(846, 42, '全螢幕', {
+      fontFamily, fontSize: '22px', color: '#d8fffa', fontStyle: 'bold',
     }).setOrigin(0.5).setScrollFactor(0).setDepth(121)
     button.on('pointerdown', (_pointer: Phaser.Input.Pointer, _x: number, _y: number,
       event: Phaser.Types.Input.EventData) => {
@@ -1410,9 +1415,12 @@ class PrototypeScene extends Phaser.Scene {
   }
 
   private updateHealthDisplay(): void {
+    this.playerBar.setName(professionNames[this.profession])
     this.playerBar.update(this.player.x, this.player.y - 79, this.playerHp)
-    this.tankGuardBar.update(this.player.x, this.player.y - 62, Math.ceil(this.tankGuard))
+    this.tankGuardBar.update(this.player.x, this.player.y - 70, Math.ceil(this.tankGuard))
     this.tankGuardBar.setVisible(this.profession === 'tank')
+    this.ammoSlots.update(this.player.x, this.player.y - 70, this.playerAmmo, this.reloading)
+    this.ammoSlots.setVisible(this.profession === 'gunner')
     this.busBar.update(this.bus.x, this.bus.y - this.bus.displayHeight - 17, this.busHp)
     const melee = this.enemies.filter(enemy => enemy.hp > 0 && enemy.kind === 'melee').length
     const ranged = this.enemies.filter(enemy => enemy.hp > 0 && enemy.kind === 'ranged').length

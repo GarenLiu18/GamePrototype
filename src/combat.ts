@@ -117,27 +117,123 @@ export function canAttackFromRight(ally: Bounds, target: Bounds, range = combatC
 export class HealthBar {
   private background: Phaser.GameObjects.Rectangle
   private fill: Phaser.GameObjects.Rectangle
-  private label: Phaser.GameObjects.Text
-  constructor(scene: Phaser.Scene, private width: number, private max: number, private name: string, color: number) {
+  private labelBg?: Phaser.GameObjects.Rectangle
+  private nameLabel?: Phaser.GameObjects.Text
+  private valueLabel?: Phaser.GameObjects.Text
+  private nameColor: string
+  constructor(
+    scene: Phaser.Scene,
+    private width: number,
+    private max: number,
+    private name: string,
+    color: number,
+    nameColor = '#e5efff',
+    private showLabel = true,
+  ) {
+    this.nameColor = nameColor
     this.background = scene.add.rectangle(0, 0, width + 4, 8, 0x09111e).setDepth(20)
     this.fill = scene.add.rectangle(0, 0, width, 4, color).setOrigin(0, 0.5).setDepth(21)
-    this.label = scene.add.text(0, 0, '', {
-      fontFamily: '"Segoe UI", "Microsoft JhengHei", sans-serif', fontSize: '11px', color: '#e5efff',
-      backgroundColor: '#09111e', padding: { x: 3, y: 1 },
-    }).setOrigin(0.5, 1).setDepth(21)
+    if (this.showLabel) {
+      this.labelBg = scene.add.rectangle(0, 0, 0, 15, 0x09111e).setOrigin(0.5, 1).setDepth(21)
+      this.nameLabel = scene.add.text(0, 0, '', {
+        fontFamily: '"Segoe UI", "Microsoft JhengHei", sans-serif', fontSize: '11px', color: this.nameColor,
+      }).setOrigin(0, 1).setDepth(22)
+      this.valueLabel = scene.add.text(0, 0, '', {
+        fontFamily: '"Segoe UI", "Microsoft JhengHei", sans-serif', fontSize: '11px', color: '#e5efff',
+      }).setOrigin(0, 1).setDepth(22)
+    }
+  }
+  setName(name: string): void {
+    this.name = name
+  }
+  setNameColor(color: string): void {
+    this.nameColor = color
+    this.nameLabel?.setColor(color)
   }
   update(x: number, y: number, hp: number, max = this.max): void {
     this.max = max
     this.background.setPosition(x, y)
     this.fill.setPosition(x - this.width / 2, y).setDisplaySize(this.width * Math.max(0, hp) / this.max, 4)
-    this.label.setPosition(x, y - 7).setText(`${this.name} ${Math.max(0, hp)} / ${this.max}`)
+    if (this.showLabel && this.nameLabel && this.valueLabel && this.labelBg) {
+      this.nameLabel.setText(this.name)
+      this.valueLabel.setText(` ${Math.max(0, hp)} / ${this.max}`)
+      const totalTextWidth = this.nameLabel.width + this.valueLabel.width
+      const startX = x - totalTextWidth / 2
+      this.nameLabel.setPosition(startX, y - 7)
+      this.valueLabel.setPosition(startX + this.nameLabel.width, y - 7)
+      this.labelBg.setPosition(x, y - 6).setSize(totalTextWidth + 6, 15)
+    }
   }
   setVisible(visible: boolean): void {
     this.background.setVisible(visible)
     this.fill.setVisible(visible)
-    this.label.setVisible(visible)
+    this.labelBg?.setVisible(visible)
+    this.nameLabel?.setVisible(visible)
+    this.valueLabel?.setVisible(visible)
   }
-  destroy(): void { this.background.destroy(); this.fill.destroy(); this.label.destroy() }
+  destroy(): void {
+    this.background.destroy()
+    this.fill.destroy()
+    this.labelBg?.destroy()
+    this.nameLabel?.destroy()
+    this.valueLabel?.destroy()
+  }
+}
+
+export class AmmoSlots {
+  private backgrounds: Phaser.GameObjects.Rectangle[] = []
+  private fills: Phaser.GameObjects.Rectangle[] = []
+  constructor(
+    private scene: Phaser.Scene,
+    private totalWidth = 54,
+    private slotCount = 3,
+    private activeColor = 0xa0e6da,
+    private reloadColor = 0xffc477,
+    private emptyColor = 0x162232,
+  ) {
+    const gap = 3
+    const slotWidth = (totalWidth - (slotCount - 1) * gap) / slotCount
+    for (let i = 0; i < slotCount; i++) {
+      const bg = scene.add.rectangle(0, 0, slotWidth, 8, 0x09111e).setDepth(20)
+      const fill = scene.add.rectangle(0, 0, slotWidth - 2, 4, activeColor).setDepth(21)
+      this.backgrounds.push(bg)
+      this.fills.push(fill)
+    }
+  }
+
+  update(x: number, y: number, ammo: number, reloading = false): void {
+    const gap = 3
+    const slotWidth = (this.totalWidth - (this.slotCount - 1) * gap) / this.slotCount
+    const startX = x - this.totalWidth / 2 + slotWidth / 2
+    const pulseAlpha = reloading ? 0.35 + 0.35 * Math.sin(this.scene.time.now / 100) : 1
+    for (let i = 0; i < this.slotCount; i++) {
+      const slotX = startX + i * (slotWidth + gap)
+      this.backgrounds[i].setPosition(slotX, y)
+      this.fills[i].setPosition(slotX, y)
+      const hasBullet = i < ammo
+      if (reloading) {
+        this.fills[i].setFillStyle(this.reloadColor, pulseAlpha)
+      } else if (hasBullet) {
+        this.fills[i].setFillStyle(this.activeColor, 1)
+      } else {
+        this.fills[i].setFillStyle(this.emptyColor, 0.45)
+      }
+    }
+  }
+
+  setVisible(visible: boolean): void {
+    for (let i = 0; i < this.slotCount; i++) {
+      this.backgrounds[i].setVisible(visible)
+      this.fills[i].setVisible(visible)
+    }
+  }
+
+  destroy(): void {
+    for (const bg of this.backgrounds) bg.destroy()
+    for (const fill of this.fills) fill.destroy()
+    this.backgrounds = []
+    this.fills = []
+  }
 }
 
 export interface FriendlyTarget {
