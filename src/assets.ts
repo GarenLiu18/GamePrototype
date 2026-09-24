@@ -31,6 +31,9 @@ export const avatarActions = {
     'ThrowUnderarm01', 'ThrowUnderarm02', 'ThrowUnderarm03',
     'ThrowUnderarm04', 'ThrowUnderarm05', 'ThrowUnderarm06',
   ], false, 10),
+  PushIdle: action('PushIdle', [
+    'PushIdle01', 'PushIdle02', 'PushIdle03', 'PushIdle04', 'PushIdle05', 'PushIdle06',
+  ], true, 10),
   SwordComboA: action('Combat/SwordComboA', [
     'SwordCombo0101', 'SwordCombo0102', 'SwordCombo0103',
     'SwordCombo0104', 'SwordCombo0105', 'SwordCombo0106',

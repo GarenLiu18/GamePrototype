@@ -41,7 +41,14 @@ type Soul = {
 type AllySpawnRequest = Pick<Soul, 'kind' | 'combatAdvance' | 'progression'>
 
 type TouchControl = 'left' | 'right' | 'up' | 'down' | 'jump' | 'fire' | 'banner' | 'profession'
-type Profession = 'gunner' | 'healer'
+type Profession = 'gunner' | 'healer' | 'tank'
+const professionNames: Record<Profession, string> = {
+  gunner: '槍手', healer: '補師', tank: '坦克',
+}
+const professionColors: Record<Profession, number> = {
+  gunner: 0xf47b86, healer: 0x72e7c6, tank: 0x7cb7ff,
+}
+const professions: Profession[] = ['gunner', 'healer', 'tank']
 type FullscreenDocument = Document & {
   webkitFullscreenElement?: Element
   webkitExitFullscreen?: () => Promise<void> | void
@@ -115,6 +122,8 @@ class PrototypeScene extends Phaser.Scene {
   private reloading = false
   private playerAmmo = 3
   private profession: Profession = 'gunner'
+  private blocking = false
+  private primaryActionPointerId: number | null = null
   private professionMenu?: Phaser.GameObjects.Container
   private professionMenuSelection = 0
   private professionMenuButtons: Phaser.GameObjects.Rectangle[] = []
@@ -164,6 +173,8 @@ class PrototypeScene extends Phaser.Scene {
     this.reloading = false
     this.playerAmmo = 3
     this.profession = 'gunner'
+    this.blocking = false
+    this.primaryActionPointerId = null
     this.professionMenu?.destroy()
     this.professionMenu = undefined
     this.setCombatTimeScale(1)
@@ -604,10 +615,19 @@ class PrototypeScene extends Phaser.Scene {
 
   private onPointerUp(pointer: Phaser.Input.Pointer): void {
     this.touchControlPointers.delete(pointer.id)
+    if (this.primaryActionPointerId === pointer.id) this.primaryActionPointerId = null
   }
 
   private touchControlIsDown(control: TouchControl): boolean {
     return [...this.touchControlPointers.values()].includes(control)
+  }
+
+  private updateBlocking(): void {
+    this.blocking = this.profession === 'tank' && !this.professionMenuOpen && !this.hurt
+      && (this.touchControlIsDown('fire') || this.primaryActionPointerId !== null)
+    if (!this.blocking) return
+    this.player.setVelocityX(0)
+    this.playAction('PushIdle')
   }
 
   private get professionMenuOpen(): boolean {
@@ -631,21 +651,19 @@ class PrototypeScene extends Phaser.Scene {
     }
     this.firing = false
     this.player.setVelocityX(0)
-    this.professionMenuSelection = this.profession === 'gunner' ? 0 : 1
+    this.professionMenuSelection = professions.indexOf(this.profession)
     this.professionMenuButtons = []
     this.professionMenuLabels = []
     const panel = this.add.container(480, 265).setScrollFactor(0).setDepth(200)
-    panel.add(this.add.rectangle(0, 0, 480, 246, 0x09111e, 0.97)
+    panel.add(this.add.rectangle(0, 0, 320, 286, 0x09111e, 0.97)
       .setStrokeStyle(2, 0x72e7c6, 0.95))
-    panel.add(this.add.text(0, -91, '選擇', {
+    panel.add(this.add.text(0, -112, '選擇', {
       fontFamily, fontSize: '26px', color: '#eafffb', fontStyle: 'bold',
     }).setOrigin(0.5))
-    panel.add(this.add.text(0, -56, '遊戲時間已減緩為 1 / 10', {
-      fontFamily, fontSize: '13px', color: '#8edbd2',
-    }).setOrigin(0.5))
-    const addChoice = (x: number, profession: Profession, title: string, detail: string, color: number) => {
-      const button = this.add.rectangle(x, 20, 202, 106, 0x132238, 0.98)
-        .setStrokeStyle(2, color, 0.95).setInteractive({ useHandCursor: true })
+    const addChoice = (index: number, profession: Profession) => {
+      const y = -52 + index * 58
+      const button = this.add.rectangle(0, y, 240, 48, 0x132238, 0.98)
+        .setStrokeStyle(2, professionColors[profession], 0.95).setInteractive({ useHandCursor: true })
       button.on('pointerdown', (_pointer: Phaser.Input.Pointer, _x: number, _y: number,
         event: Phaser.Types.Input.EventData) => {
         event.stopPropagation()
@@ -653,18 +671,14 @@ class PrototypeScene extends Phaser.Scene {
       })
       panel.add(button)
       this.professionMenuButtons.push(button)
-      const label = this.add.text(x, -11, title, {
-        fontFamily, fontSize: '20px', color: '#f4fbff', fontStyle: 'bold',
+      const label = this.add.text(0, y, professionNames[profession], {
+        fontFamily, fontSize: '19px', color: '#f4fbff', fontStyle: 'bold',
       }).setOrigin(0.5)
       panel.add(label)
       this.professionMenuLabels.push(label)
-      panel.add(this.add.text(x, 19, detail, {
-        fontFamily, fontSize: '11px', color: '#b9cad8', align: 'center', wordWrap: { width: 178 },
-      }).setOrigin(0.5))
     }
-    addChoice(-112, 'gunner', '槍手', '○ 射擊\n3 發彈藥後換彈', 0xf47b86)
-    addChoice(112, 'healer', '補師', '○ 回復附近最低血量友軍\n每次 +10，不會治療自己', 0x72e7c6)
-    panel.add(this.add.text(0, 100, '↑ / ↓ 或 W / S 選擇　○ / Enter / 空白鍵確認', {
+    professions.forEach((profession, index) => addChoice(index, profession))
+    panel.add(this.add.text(0, 116, '↑ / ↓ 或 W / S 選擇　○ / Enter / 空白鍵確認', {
       fontFamily, fontSize: '12px', color: '#8ca3bc',
     }).setOrigin(0.5))
     this.professionMenu = panel
@@ -674,7 +688,7 @@ class PrototypeScene extends Phaser.Scene {
 
   private moveProfessionMenuSelection(direction: -1 | 1): void {
     if (!this.professionMenuOpen) return
-    this.professionMenuSelection = Phaser.Math.Wrap(this.professionMenuSelection + direction, 0, 2)
+    this.professionMenuSelection = Phaser.Math.Wrap(this.professionMenuSelection + direction, 0, professions.length)
     this.refreshProfessionMenuSelection()
   }
 
@@ -683,17 +697,18 @@ class PrototypeScene extends Phaser.Scene {
       const selected = index === this.professionMenuSelection
       button.setFillStyle(selected ? 0x173c43 : 0x132238, 0.98)
       button.setScale(selected ? 1.04 : 1)
-      this.professionMenuLabels[index]?.setText(`${selected ? '▶ ' : ''}${index === 0 ? '槍手' : '補師'}`)
+      this.professionMenuLabels[index]?.setText(`${selected ? '▶ ' : ''}${professionNames[professions[index]]}`)
     }
   }
 
   private selectProfessionBySelection(): void {
-    this.selectProfession(this.professionMenuSelection === 0 ? 'gunner' : 'healer')
+    this.selectProfession(professions[this.professionMenuSelection])
   }
 
   private selectProfession(profession: Profession): void {
     this.profession = profession
-    if (profession === 'healer') this.reloading = false
+    this.blocking = false
+    if (profession !== 'gunner') this.reloading = false
     this.closeProfessionMenu()
   }
 
@@ -901,7 +916,10 @@ class PrototypeScene extends Phaser.Scene {
   }
 
   private onPointerDown(pointer: Phaser.Input.Pointer): void {
-    if (!this.professionMenuOpen && !this.touchControlPointers.has(pointer.id) && pointer.button === 0) this.fire()
+    if (!this.professionMenuOpen && !this.touchControlPointers.has(pointer.id) && pointer.button === 0) {
+      this.primaryActionPointerId = pointer.id
+      this.fire()
+    }
   }
 
   private fire(): void {
@@ -911,6 +929,7 @@ class PrototypeScene extends Phaser.Scene {
       this.healLowestNearbyAlly()
       return
     }
+    if (this.profession === 'tank') return
     if (this.reloading) return
     if (this.playerAmmo <= 0) {
       this.startReload()
@@ -1234,6 +1253,7 @@ class PrototypeScene extends Phaser.Scene {
     credit?: KillCredit): void {
     if (this.gameEnded) return
     if (target === 'player') {
+      if (this.blocking) return
       if (this.time.now < this.invulnerableUntil) return
       this.playerHp = Math.max(0, this.playerHp - amount)
       if (this.playerHp === 0) credit?.recordKill()
@@ -1303,10 +1323,12 @@ class PrototypeScene extends Phaser.Scene {
     const ranged = this.enemies.filter(enemy => enemy.hp > 0 && enemy.kind === 'ranged').length
     this.healthText.setText(`玩家 ${this.playerHp} / ${combatConfig.playerHealth}    巴士 ${this.busHp} / ${combatConfig.busHealth}    近戰 ${melee} · 遠攻 ${ranged}`)
     const healing = this.profession === 'healer'
-    this.professionText.setColor(healing ? '#72e7c6' : '#f47b86')
-      .setText(healing ? '補師' : '槍手')
-    this.ammoText.setColor(healing ? '#72e7c6' : this.reloading ? '#ffc477' : '#a0e6da')
-      .setText(healing ? `治療 +${HEAL_AMOUNT} · 範圍 ${HEAL_RANGE}` : this.reloading ? '換彈中…' : `彈藥 ${this.playerAmmo} / 3`)
+    const tank = this.profession === 'tank'
+    this.professionText.setColor(tank ? '#7cb7ff' : healing ? '#72e7c6' : '#f47b86')
+      .setText(professionNames[this.profession])
+    this.ammoText.setColor(tank ? '#7cb7ff' : healing ? '#72e7c6' : this.reloading ? '#ffc477' : '#a0e6da')
+      .setText(tank ? this.blocking ? '格擋中 · 無敵' : '按住 ○ 格擋' : healing
+        ? `治療 +${HEAL_AMOUNT} · 範圍 ${HEAL_RANGE}` : this.reloading ? '換彈中…' : `彈藥 ${this.playerAmmo} / 3`)
   }
 
   private updateBossHud(): void {
@@ -1409,6 +1431,7 @@ class PrototypeScene extends Phaser.Scene {
       if (Phaser.Input.Keyboard.JustDown(this.cursors.space)
         || Phaser.Input.Keyboard.JustDown(this.enterKey)) this.selectProfessionBySelection()
     }
+    this.updateBlocking()
     if (!this.gameEnded && !controlsLocked) this.updateAllyBanner()
     this.updateHealthDisplay()
     this.updateBossHud()
@@ -1425,15 +1448,17 @@ class PrototypeScene extends Phaser.Scene {
     const body = this.player.body as Phaser.Physics.Arcade.Body
     let grounded = body.blocked.down || body.touching.down
     if (grounded && !this.hurt) this.lastGrounded = time
-    const left = !controlsLocked && (this.cursors.left.isDown || this.keys.A.isDown || this.touchControlIsDown('left'))
-    const right = !controlsLocked && (this.cursors.right.isDown || this.keys.D.isDown || this.touchControlIsDown('right'))
+    const left = !controlsLocked && !this.blocking
+      && (this.cursors.left.isDown || this.keys.A.isDown || this.touchControlIsDown('left'))
+    const right = !controlsLocked && !this.blocking
+      && (this.cursors.right.isDown || this.keys.D.isDown || this.touchControlIsDown('right'))
     const direction = Number(right) - Number(left)
     if (!this.hurt) {
       this.player.setVelocityX(direction * SPEED)
       if (direction) this.player.setFlipX(direction < 0)
     }
     this.updateCameraFocus(gameplayDelta, direction)
-    if (!controlsLocked && !this.hurt && grounded && this.player.y < GROUND_Y - 8
+    if (!controlsLocked && !this.blocking && !this.hurt && grounded && this.player.y < GROUND_Y - 8
       && Phaser.Input.Keyboard.JustDown(this.cursors.down)) {
       this.dropThroughUntil = time + DROP_THROUGH_MS
       this.player.y += 4
@@ -1444,23 +1469,23 @@ class PrototypeScene extends Phaser.Scene {
     // Read every edge, including simultaneous keys, to avoid stale jump requests.
     const jumpEdges = [this.cursors.space, this.cursors.up, this.keys.W]
       .map(key => Phaser.Input.Keyboard.JustDown(key))
-    if (!controlsLocked && !this.hurt && jumpEdges.some(Boolean)) this.jumpQueued = time
-    const jumpHeld = !controlsLocked && (this.cursors.space.isDown || this.cursors.up.isDown || this.keys.W.isDown
+    if (!controlsLocked && !this.blocking && !this.hurt && jumpEdges.some(Boolean)) this.jumpQueued = time
+    const jumpHeld = !controlsLocked && !this.blocking && (this.cursors.space.isDown || this.cursors.up.isDown || this.keys.W.isDown
       || this.touchControlIsDown('jump')
     )
-    if (!this.hurt && time - this.jumpQueued <= JUMP_BUFFER_MS && time - this.lastGrounded <= COYOTE_MS) {
+    if (!this.blocking && !this.hurt && time - this.jumpQueued <= JUMP_BUFFER_MS && time - this.lastGrounded <= COYOTE_MS) {
       this.player.setVelocityY(-JUMP_SPEED)
       this.lastGrounded = -Infinity
       this.jumpQueued = -Infinity
       this.jumpReleased = false
     }
     // Releasing early produces a shorter jump.
-    if (!this.hurt && !jumpHeld && !this.jumpReleased && body.velocity.y < -240) {
+    if (!this.blocking && !this.hurt && !jumpHeld && !this.jumpReleased && body.velocity.y < -240) {
       this.player.setVelocityY(-240)
       this.jumpReleased = true
     }
     // Shooting owns the animation temporarily, while movement physics continue.
-    if (!this.firing && !this.reloading && !this.hurt) {
+    if (!this.firing && !this.reloading && !this.hurt && !this.blocking) {
       if (body.velocity.y < -80) this.playAction('JumpRise')
       else if (!grounded && body.velocity.y > 80) this.playAction('JumpFall')
       else if (!grounded) this.playAction('JumpMid')
