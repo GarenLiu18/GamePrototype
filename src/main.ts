@@ -19,7 +19,8 @@ const BULLET_SPEED = 760
 const BULLET_LIFETIME_MS = 1400
 const HEAL_RANGE = 320
 const HEAL_AMOUNT = 10
-const HEAL_WAVE_SPEED = combatConfig.projectileSpeed * 2
+// The wave is three times faster than its previous 2x-arrow implementation.
+const HEAL_WAVE_SPEED_MULTIPLIER = 6
 const HEAL_WAVE_LIFETIME_MS = 1200
 const PROFESSION_MENU_TIME_SCALE = 0.1
 const CAMERA_FORWARD_FOCUS = 170
@@ -935,8 +936,7 @@ class PrototypeScene extends Phaser.Scene {
       }))
       .filter(candidate => candidate.distance <= HEAL_RANGE)
       .sort((a, b) => a.ally.hp - b.ally.hp || a.distance - b.distance)[0]?.ally
-    if (!target) return
-    if (!this.launchHealingWave(target)) return
+    if (target) this.launchHealingWave(target)
     this.firing = true
     this.playAction('ThrowUnderarm')
   }
@@ -952,7 +952,9 @@ class PrototypeScene extends Phaser.Scene {
     wave.enableBody(true, x, y, true, true)
     wave.setSize(20, 14).setOffset(4, 3)
     const body = wave.body as Phaser.Physics.Arcade.Body
-    body.setAllowGravity(false).setGravityY(0)
+    body.setAllowGravity(true).setGravityY(combatConfig.projectileGravity - this.physics.world.gravity.y)
+    const velocity = ballisticVelocity(x, y, target.sprite.x, target.sprite.y - 42, HEAL_WAVE_SPEED_MULTIPLIER)
+    wave.setVelocity(velocity.x, velocity.y).setRotation(Math.atan2(velocity.y, velocity.x))
     wave.setData('healTarget', target)
     wave.setData('healAmount', HEAL_AMOUNT)
     wave.setData('expiresAt', this.time.now + HEAL_WAVE_LIFETIME_MS)
@@ -987,18 +989,13 @@ class PrototypeScene extends Phaser.Scene {
         this.recycleHealingWave(wave)
         continue
       }
-      const targetX = target.sprite.x
-      const targetY = target.sprite.y - 42
-      const dx = targetX - wave.x
-      const dy = targetY - wave.y
-      const distance = Math.hypot(dx, dy)
-      if (distance <= 16) {
+      const distance = Phaser.Math.Distance.Between(target.sprite.x, target.sprite.y - 42, wave.x, wave.y)
+      if (distance <= 24) {
         this.finishHealingWave(wave, target)
         continue
       }
-      const velocityX = dx / distance * HEAL_WAVE_SPEED
-      const velocityY = dy / distance * HEAL_WAVE_SPEED
-      wave.setVelocity(velocityX, velocityY).setRotation(Math.atan2(velocityY, velocityX))
+      const velocity = (wave.body as Phaser.Physics.Arcade.Body).velocity
+      wave.setRotation(Math.atan2(velocity.y, velocity.x))
     }
   }
 
