@@ -593,6 +593,7 @@ export class AllyUnit implements FriendlyTarget {
   }
 
   get attackDamage(): number { return this.progression.scaleDamage(combatConfig.enemyDamage) }
+  get maxHealth(): number { return this.progression.maxHealth }
 
   update(time: number, enemies: HostileTarget[], launch: (ally: AllyUnit, target: Bounds) => void): void {
     if (this.hp <= 0) return
@@ -689,6 +690,18 @@ export class AllyUnit implements FriendlyTarget {
       this.sprite.setTintFill(0xffffff)
       this.scene.time.delayedCall(90, () => { if (this.sprite.active) this.sprite.setTint(ALLY_TINT) })
     }
+  }
+
+  heal(amount: number): number {
+    if (this.hp <= 0 || !this.sprite.active || amount <= 0) return 0
+    const healed = Math.min(amount, this.maxHealth - this.hp)
+    if (healed <= 0) return 0
+    this.hp += healed
+    this.sprite.setTintFill(0x72e7c6)
+    this.scene.time.delayedCall(90, () => {
+      if (this.sprite.active && this.hp > 0) this.sprite.setTint(ALLY_TINT)
+    })
+    return healed
   }
 
   stop(): void { if (this.hp > 0) this.sprite.setVelocity(0).stop() }

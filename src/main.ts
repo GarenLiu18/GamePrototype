@@ -17,6 +17,11 @@ const DROP_THROUGH_MS = 300
 const DROP_THROUGH_SPEED = 120
 const BULLET_SPEED = 760
 const BULLET_LIFETIME_MS = 1400
+const HEAL_RANGE = 320
+const HEAL_AMOUNT = 10
+const HEAL_WAVE_SPEED = combatConfig.projectileSpeed * 2
+const HEAL_WAVE_LIFETIME_MS = 1200
+const PROFESSION_MENU_TIME_SCALE = 0.1
 const CAMERA_FORWARD_FOCUS = 170
 const CAMERA_FOCUS_TRANSITION_DURATION = 700
 const CAMERA_TRACKING_SMOOTHING = 2.4
@@ -34,7 +39,8 @@ type Soul = {
 
 type AllySpawnRequest = Pick<Soul, 'kind' | 'combatAdvance' | 'progression'>
 
-type TouchControl = 'left' | 'right' | 'jump' | 'fire' | 'banner'
+type TouchControl = 'left' | 'right' | 'up' | 'down' | 'jump' | 'fire' | 'banner' | 'profession'
+type Profession = 'gunner' | 'healer'
 type FullscreenDocument = Document & {
   webkitFullscreenElement?: Element
   webkitExitFullscreen?: () => Promise<void> | void
@@ -46,11 +52,13 @@ type FullscreenTarget = HTMLElement & {
 class PrototypeScene extends Phaser.Scene {
   private player!: Phaser.Physics.Arcade.Sprite
   private cursors!: Phaser.Types.Input.Keyboard.CursorKeys
-  private keys!: Record<'A' | 'D' | 'W' | 'R' | 'E', Phaser.Input.Keyboard.Key>
+  private keys!: Record<'A' | 'D' | 'W' | 'S' | 'R' | 'E' | 'Q', Phaser.Input.Keyboard.Key>
+  private enterKey!: Phaser.Input.Keyboard.Key
   private layers: { sprite: Phaser.GameObjects.TileSprite; speed: number }[] = []
   private healthText!: Phaser.GameObjects.Text
   private stateText!: Phaser.GameObjects.Text
   private ammoText!: Phaser.GameObjects.Text
+  private professionText!: Phaser.GameObjects.Text
   private minimap!: Phaser.GameObjects.Graphics
   private minimapHud!: Phaser.GameObjects.Container
   private bossHud!: Phaser.GameObjects.Container
@@ -89,6 +97,7 @@ class PrototypeScene extends Phaser.Scene {
   private hitStartedAt = 0
   private gameEnded = false
   private bullets!: Phaser.Physics.Arcade.Group
+  private healingProjectiles!: Phaser.Physics.Arcade.Group
   private allyProjectiles!: Phaser.Physics.Arcade.Group
   private enemyProjectiles!: Phaser.Physics.Arcade.Group
   private bossArrows!: Phaser.Physics.Arcade.Group
@@ -104,6 +113,11 @@ class PrototypeScene extends Phaser.Scene {
   private firing = false
   private reloading = false
   private playerAmmo = 3
+  private profession: Profession = 'gunner'
+  private professionMenu?: Phaser.GameObjects.Container
+  private professionMenuSelection = 0
+  private professionMenuButtons: Phaser.GameObjects.Rectangle[] = []
+  private professionMenuLabels: Phaser.GameObjects.Text[] = []
   private touchControlPointers = new Map<number, TouchControl>()
   private bannerActionQueued = false
   private fullscreenLabel!: Phaser.GameObjects.Text
@@ -148,6 +162,10 @@ class PrototypeScene extends Phaser.Scene {
     this.firing = false
     this.reloading = false
     this.playerAmmo = 3
+    this.profession = 'gunner'
+    this.professionMenu?.destroy()
+    this.professionMenu = undefined
+    this.setCombatTimeScale(1)
     this.bossRainActive = false
     this.bossHudVisible = false
     this.bossHudCommitted = false
@@ -231,6 +249,8 @@ class PrototypeScene extends Phaser.Scene {
         hostile instanceof Enemy ? hostile.progression : undefined)
     })
     this.bullets = this.physics.add.group({ allowGravity: false, maxSize: 24 })
+    this.createHealingWaveTexture()
+    this.healingProjectiles = this.physics.add.group({ allowGravity: false, maxSize: 12 })
     const recyclePlayerBullet: Phaser.Types.Physics.Arcade.ArcadePhysicsCallback = projectile => {
       this.recycleBullet(projectile as Phaser.Physics.Arcade.Sprite)
     }
@@ -337,9 +357,10 @@ class PrototypeScene extends Phaser.Scene {
     })
     this.createBossRain(groundSolids)
     this.player.on(Phaser.Animations.Events.ANIMATION_COMPLETE, (animation: Phaser.Animations.Animation) => {
-      if (animation.key === avatarActions.GunFire.key || animation.key === avatarActions.GunRunFire.key) {
+      if (animation.key === avatarActions.GunFire.key || animation.key === avatarActions.GunRunFire.key
+        || animation.key === avatarActions.ThrowUnderarm.key) {
         this.firing = false
-        if (this.playerAmmo === 0 && !this.hurt) this.startReload()
+        if (this.profession === 'gunner' && this.playerAmmo === 0 && !this.hurt) this.startReload()
       }
       if (animation.key === avatarActions.GunReload.key) {
         this.reloading = false
@@ -347,7 +368,7 @@ class PrototypeScene extends Phaser.Scene {
       }
       if (animation.key === avatarActions.Knockback.key) {
         this.hurt = false
-        if (this.playerAmmo === 0) this.startReload()
+        if (this.profession === 'gunner' && this.playerAmmo === 0) this.startReload()
       }
     })
     this.input.on('pointerdown', this.onPointerDown, this)
@@ -360,7 +381,8 @@ class PrototypeScene extends Phaser.Scene {
     })
     this.playAction('Idle')
     this.cursors = this.input.keyboard!.createCursorKeys()
-    this.keys = this.input.keyboard!.addKeys('A,D,W,R,E') as typeof this.keys
+    this.keys = this.input.keyboard!.addKeys('A,D,W,S,R,E,Q') as typeof this.keys
+    this.enterKey = this.input.keyboard!.addKey(Phaser.Input.Keyboard.KeyCodes.ENTER)
     this.input.keyboard!.addCapture(['SPACE', 'UP', 'DOWN', 'LEFT', 'RIGHT'])
     const camera = this.cameras.main
     camera.setBounds(0, 0, WORLD_WIDTH, 540)
@@ -369,6 +391,18 @@ class PrototypeScene extends Phaser.Scene {
     this.createTouchControls()
     this.createFullscreenButton()
     this.spawnInitialForces()
+  }
+
+  private createHealingWaveTexture(): void {
+    const key = 'effects/healing-wave'
+    if (this.textures.exists(key)) return
+    const graphics = this.make.graphics({ x: 0, y: 0 }, false)
+    graphics.fillStyle(0x2ae892, 0.22).fillCircle(10, 10, 10)
+    graphics.fillStyle(0x63ffc0, 0.85).fillCircle(10, 10, 6)
+    graphics.fillStyle(0xd9fff0, 1).fillCircle(10, 10, 3)
+    graphics.fillStyle(0x63ffc0, 0.8).fillTriangle(12, 5, 26, 10, 12, 15)
+    graphics.generateTexture(key, 28, 20)
+    graphics.destroy()
   }
 
   private createBossRain(groundSolids: Phaser.Physics.Arcade.StaticGroup): void {
@@ -470,7 +504,9 @@ class PrototypeScene extends Phaser.Scene {
     hud.add(this.healthText)
     hud.add(text(925, 48, '敵軍紅／金 · 友軍灰 · 雙方近戰與遠攻', 11, '#8ca3bc').setOrigin(1, 0))
     hud.add(this.add.rectangle(480, 521, 960, 38, 0x090f20, 0.95))
-    hud.add(text(24, 511, 'A D / ← → 移動    SPACE / W / ↑ 跳躍    E 旗幟    滑鼠左鍵 射擊    R 重來', 12, '#b0c2d6'))
+    hud.add(text(24, 511, 'A D / ← → 移動    SPACE / W / ↑ 跳躍    E 旗幟    Q / △ 選擇    ○ / 滑鼠左鍵 行動    R 重來', 12, '#b0c2d6'))
+    this.professionText = text(560, 511, '', 12, '#a0e6da').setOrigin(1, 0)
+    hud.add(this.professionText)
     this.ammoText = text(705, 511, '', 12, '#a0e6da').setOrigin(1, 0)
     hud.add(this.ammoText)
     this.stateText = text(935, 511, '守住巴士', 12, '#a0e6da').setOrigin(1, 0)
@@ -493,10 +529,12 @@ class PrototypeScene extends Phaser.Scene {
     }
     addButton(47, 465, '◀', 'left', 0x7cb7ff)
     addButton(131, 465, '▶', 'right', 0x7cb7ff)
-    // PlayStation-style face-button layout: △ is intentionally omitted.
+    addButton(89, 400, '▲', 'up', 0x7cb7ff)
+    addButton(89, 510, '▼', 'down', 0x7cb7ff)
+    addButton(835, 380, '△', 'profession', 0x72e7c6)
     addButton(770, 435, '旗', 'banner', 0x71d9cf)
-    addButton(900, 435, '射', 'fire', 0xf47b86)
-    addButton(835, 490, '跳', 'jump', 0xf9df84)
+    addButton(900, 435, '○', 'fire', 0xf47b86)
+    addButton(835, 490, '×', 'jump', 0xf9df84)
   }
 
   private createFullscreenButton(): void {
@@ -552,9 +590,15 @@ class PrototypeScene extends Phaser.Scene {
 
   private pressTouchControl(control: TouchControl, pointer: Phaser.Input.Pointer): void {
     this.touchControlPointers.set(pointer.id, control)
-    if (control === 'jump') this.jumpQueued = this.time.now
-    if (control === 'fire') this.fire()
+    if (control === 'jump' || (control === 'up' && !this.professionMenuOpen)) this.jumpQueued = this.time.now
+    if (control === 'up' && this.professionMenuOpen) this.moveProfessionMenuSelection(-1)
+    if (control === 'down' && this.professionMenuOpen) this.moveProfessionMenuSelection(1)
+    if (control === 'fire') {
+      if (this.professionMenuOpen) this.selectProfessionBySelection()
+      else this.fire()
+    }
     if (control === 'banner') this.bannerActionQueued = true
+    if (control === 'profession') this.toggleProfessionMenu()
   }
 
   private onPointerUp(pointer: Phaser.Input.Pointer): void {
@@ -563,6 +607,101 @@ class PrototypeScene extends Phaser.Scene {
 
   private touchControlIsDown(control: TouchControl): boolean {
     return [...this.touchControlPointers.values()].includes(control)
+  }
+
+  private get professionMenuOpen(): boolean {
+    return Boolean(this.professionMenu?.active)
+  }
+
+  private setCombatTimeScale(scale: number): void {
+    // Arcade World timeScale is the inverse of regular game time: 2 is half
+    // speed and 0.5 is double speed. Keep it aligned with the Clock scale.
+    this.physics.world.timeScale = 1 / scale
+    this.time.timeScale = scale
+    this.anims.globalTimeScale = scale
+    this.tweens.timeScale = scale
+  }
+
+  private toggleProfessionMenu(): void {
+    if (this.gameEnded) return
+    if (this.professionMenuOpen) {
+      this.closeProfessionMenu()
+      return
+    }
+    this.firing = false
+    this.player.setVelocityX(0)
+    this.professionMenuSelection = this.profession === 'gunner' ? 0 : 1
+    this.professionMenuButtons = []
+    this.professionMenuLabels = []
+    const panel = this.add.container(480, 265).setScrollFactor(0).setDepth(200)
+    panel.add(this.add.rectangle(0, 0, 480, 246, 0x09111e, 0.97)
+      .setStrokeStyle(2, 0x72e7c6, 0.95))
+    panel.add(this.add.text(0, -91, '選擇', {
+      fontFamily, fontSize: '26px', color: '#eafffb', fontStyle: 'bold',
+    }).setOrigin(0.5))
+    panel.add(this.add.text(0, -56, '遊戲時間已減緩為 1 / 10', {
+      fontFamily, fontSize: '13px', color: '#8edbd2',
+    }).setOrigin(0.5))
+    const addChoice = (x: number, profession: Profession, title: string, detail: string, color: number) => {
+      const button = this.add.rectangle(x, 20, 202, 106, 0x132238, 0.98)
+        .setStrokeStyle(2, color, 0.95).setInteractive({ useHandCursor: true })
+      button.on('pointerdown', (_pointer: Phaser.Input.Pointer, _x: number, _y: number,
+        event: Phaser.Types.Input.EventData) => {
+        event.stopPropagation()
+        this.selectProfession(profession)
+      })
+      panel.add(button)
+      this.professionMenuButtons.push(button)
+      const label = this.add.text(x, -11, title, {
+        fontFamily, fontSize: '20px', color: '#f4fbff', fontStyle: 'bold',
+      }).setOrigin(0.5)
+      panel.add(label)
+      this.professionMenuLabels.push(label)
+      panel.add(this.add.text(x, 19, detail, {
+        fontFamily, fontSize: '11px', color: '#b9cad8', align: 'center', wordWrap: { width: 178 },
+      }).setOrigin(0.5))
+    }
+    addChoice(-112, 'gunner', '槍手', '○ 射擊\n3 發彈藥後換彈', 0xf47b86)
+    addChoice(112, 'healer', '補師', '○ 回復附近最低血量友軍\n每次 +10，不會治療自己', 0x72e7c6)
+    panel.add(this.add.text(0, 100, '↑ / ↓ 或 W / S 選擇　○ / Enter / 空白鍵確認', {
+      fontFamily, fontSize: '12px', color: '#8ca3bc',
+    }).setOrigin(0.5))
+    this.professionMenu = panel
+    this.refreshProfessionMenuSelection()
+    this.setCombatTimeScale(PROFESSION_MENU_TIME_SCALE)
+  }
+
+  private moveProfessionMenuSelection(direction: -1 | 1): void {
+    if (!this.professionMenuOpen) return
+    this.professionMenuSelection = Phaser.Math.Wrap(this.professionMenuSelection + direction, 0, 2)
+    this.refreshProfessionMenuSelection()
+  }
+
+  private refreshProfessionMenuSelection(): void {
+    for (const [index, button] of this.professionMenuButtons.entries()) {
+      const selected = index === this.professionMenuSelection
+      button.setFillStyle(selected ? 0x173c43 : 0x132238, 0.98)
+      button.setScale(selected ? 1.04 : 1)
+      this.professionMenuLabels[index]?.setText(`${selected ? '▶ ' : ''}${index === 0 ? '槍手' : '補師'}`)
+    }
+  }
+
+  private selectProfessionBySelection(): void {
+    this.selectProfession(this.professionMenuSelection === 0 ? 'gunner' : 'healer')
+  }
+
+  private selectProfession(profession: Profession): void {
+    this.profession = profession
+    if (profession === 'healer') this.reloading = false
+    this.closeProfessionMenu()
+  }
+
+  private closeProfessionMenu(): void {
+    this.professionMenu?.destroy()
+    this.professionMenu = undefined
+    this.professionMenuButtons = []
+    this.professionMenuLabels = []
+    this.setCombatTimeScale(1)
   }
 
   private updateCameraFocus(delta: number, movementDirection: number): void {
@@ -761,12 +900,17 @@ class PrototypeScene extends Phaser.Scene {
   }
 
   private onPointerDown(pointer: Phaser.Input.Pointer): void {
-    if (!this.touchControlPointers.has(pointer.id) && pointer.button === 0) this.fire()
+    if (!this.professionMenuOpen && !this.touchControlPointers.has(pointer.id) && pointer.button === 0) this.fire()
   }
 
   private fire(): void {
     // Let the complete shot animation finish before accepting the next click.
-    if (this.firing || this.reloading || this.hurt || this.gameEnded) return
+    if (this.firing || this.hurt || this.gameEnded || this.professionMenuOpen) return
+    if (this.profession === 'healer') {
+      this.healLowestNearbyAlly()
+      return
+    }
+    if (this.reloading) return
     if (this.playerAmmo <= 0) {
       this.startReload()
       return
@@ -780,6 +924,82 @@ class PrototypeScene extends Phaser.Scene {
     const running = (body.blocked.down || body.touching.down) && Math.abs(body.velocity.x) > 0
     this.firing = true
     this.playAction(running ? 'GunRunFire' : 'GunFire')
+  }
+
+  private healLowestNearbyAlly(): void {
+    const target = this.allies
+      .filter(ally => ally.hp > 0 && ally.sprite.active && ally.hp < ally.maxHealth)
+      .map(ally => ({
+        ally,
+        distance: Phaser.Math.Distance.Between(this.player.x, this.player.y, ally.sprite.x, ally.sprite.y),
+      }))
+      .filter(candidate => candidate.distance <= HEAL_RANGE)
+      .sort((a, b) => a.ally.hp - b.ally.hp || a.distance - b.distance)[0]?.ally
+    if (!target) return
+    if (!this.launchHealingWave(target)) return
+    this.firing = true
+    this.playAction('ThrowUnderarm')
+  }
+
+  private launchHealingWave(target: AllyUnit): boolean {
+    const direction = target.sprite.x >= this.player.x ? 1 : -1
+    const x = this.player.x + direction * 30
+    const y = this.player.y - 42
+    const wave = this.healingProjectiles.get(x, y, 'effects/healing-wave') as Phaser.Physics.Arcade.Sprite | null
+    if (!wave) return false
+    wave.setTexture('effects/healing-wave').setOrigin(0.36, 0.5).setDepth(12).setAlpha(1)
+      .setScale(1.25).setFlipX(false)
+    wave.enableBody(true, x, y, true, true)
+    wave.setSize(20, 14).setOffset(4, 3)
+    const body = wave.body as Phaser.Physics.Arcade.Body
+    body.setAllowGravity(false).setGravityY(0)
+    wave.setData('healTarget', target)
+    wave.setData('healAmount', HEAL_AMOUNT)
+    wave.setData('expiresAt', this.time.now + HEAL_WAVE_LIFETIME_MS)
+    return true
+  }
+
+  private recycleHealingWave(wave: Phaser.Physics.Arcade.Sprite): void {
+    wave.setData('healTarget', undefined)
+    wave.setData('healAmount', undefined)
+    wave.disableBody(true, true)
+  }
+
+  private finishHealingWave(wave: Phaser.Physics.Arcade.Sprite, target: AllyUnit): void {
+    const healed = target.heal(wave.getData('healAmount') as number)
+    this.recycleHealingWave(wave)
+    if (healed <= 0) return
+    const value = this.add.text(target.sprite.x, target.sprite.y - 74, `+${healed}`, {
+      fontFamily, fontSize: '15px', color: '#baffee', fontStyle: 'bold',
+    }).setOrigin(0.5).setDepth(13)
+    this.tweens.add({
+      targets: value, y: value.y - 16, alpha: 0, duration: 180, ease: 'Quad.Out',
+      onComplete: () => value.destroy(),
+    })
+  }
+
+  private updateHealingWaves(time: number): void {
+    for (const child of this.healingProjectiles.getChildren()) {
+      const wave = child as Phaser.Physics.Arcade.Sprite
+      if (!wave.active) continue
+      const target = wave.getData('healTarget') as AllyUnit | undefined
+      if (!target || target.hp <= 0 || !target.sprite.active || time >= wave.getData('expiresAt')) {
+        this.recycleHealingWave(wave)
+        continue
+      }
+      const targetX = target.sprite.x
+      const targetY = target.sprite.y - 42
+      const dx = targetX - wave.x
+      const dy = targetY - wave.y
+      const distance = Math.hypot(dx, dy)
+      if (distance <= 16) {
+        this.finishHealingWave(wave, target)
+        continue
+      }
+      const velocityX = dx / distance * HEAL_WAVE_SPEED
+      const velocityY = dy / distance * HEAL_WAVE_SPEED
+      wave.setVelocity(velocityX, velocityY).setRotation(Math.atan2(velocityY, velocityX))
+    }
   }
 
   private startReload(): void {
@@ -1061,6 +1281,7 @@ class PrototypeScene extends Phaser.Scene {
     for (const enemy of this.enemies) if (enemy.hp > 0) enemy.sprite.setVelocity(0).stop()
     this.boss.stop()
     for (const bullet of this.bullets.getChildren()) this.recycleBullet(bullet as Phaser.Physics.Arcade.Sprite)
+    for (const wave of this.healingProjectiles.getChildren()) this.recycleHealingWave(wave as Phaser.Physics.Arcade.Sprite)
     for (const arrow of this.allyProjectiles.getChildren()) this.recycleBullet(arrow as Phaser.Physics.Arcade.Sprite)
     for (const shot of this.enemyProjectiles.getChildren()) this.recycleBullet(shot as Phaser.Physics.Arcade.Sprite)
     for (const arrow of this.bossArrows.getChildren()) this.recycleBullet(arrow as Phaser.Physics.Arcade.Sprite)
@@ -1084,8 +1305,11 @@ class PrototypeScene extends Phaser.Scene {
     const melee = this.enemies.filter(enemy => enemy.hp > 0 && enemy.kind === 'melee').length
     const ranged = this.enemies.filter(enemy => enemy.hp > 0 && enemy.kind === 'ranged').length
     this.healthText.setText(`玩家 ${this.playerHp} / ${combatConfig.playerHealth}    巴士 ${this.busHp} / ${combatConfig.busHealth}    近戰 ${melee} · 遠攻 ${ranged}`)
-    this.ammoText.setColor(this.reloading ? '#ffc477' : '#a0e6da')
-      .setText(this.reloading ? '換彈中…' : `彈藥 ${this.playerAmmo} / 3`)
+    const healing = this.profession === 'healer'
+    this.professionText.setColor(healing ? '#72e7c6' : '#f47b86')
+      .setText(healing ? '補師' : '槍手')
+    this.ammoText.setColor(healing ? '#72e7c6' : this.reloading ? '#ffc477' : '#a0e6da')
+      .setText(healing ? `治療 +${HEAL_AMOUNT} · 範圍 ${HEAL_RANGE}` : this.reloading ? '換彈中…' : `彈藥 ${this.playerAmmo} / 3`)
   }
 
   private updateBossHud(): void {
@@ -1168,11 +1392,27 @@ class PrototypeScene extends Phaser.Scene {
 
   update(time: number, delta: number): void {
     if (!this.player) return
+    // Scene.update receives the raw browser timestamp. The scene Clock is the
+    // shared gameplay clock and honors the profession-menu slow-motion scale.
+    time = this.time.now
+    const gameplayDelta = delta * this.time.timeScale
     if (Phaser.Input.Keyboard.JustDown(this.keys.R)) {
       this.scene.restart()
       return
     }
-    if (!this.gameEnded) this.updateAllyBanner()
+    if (!this.gameEnded && Phaser.Input.Keyboard.JustDown(this.keys.Q)) this.toggleProfessionMenu()
+    const controlsLocked = this.professionMenuOpen
+    if (controlsLocked) {
+      const selectUp = Phaser.Input.Keyboard.JustDown(this.cursors.up)
+        || Phaser.Input.Keyboard.JustDown(this.keys.W)
+      const selectDown = Phaser.Input.Keyboard.JustDown(this.cursors.down)
+        || Phaser.Input.Keyboard.JustDown(this.keys.S)
+      if (selectUp) this.moveProfessionMenuSelection(-1)
+      if (selectDown) this.moveProfessionMenuSelection(1)
+      if (Phaser.Input.Keyboard.JustDown(this.cursors.space)
+        || Phaser.Input.Keyboard.JustDown(this.enterKey)) this.selectProfessionBySelection()
+    }
+    if (!this.gameEnded && !controlsLocked) this.updateAllyBanner()
     this.updateHealthDisplay()
     this.updateBossHud()
     this.updateMinimap()
@@ -1188,15 +1428,15 @@ class PrototypeScene extends Phaser.Scene {
     const body = this.player.body as Phaser.Physics.Arcade.Body
     let grounded = body.blocked.down || body.touching.down
     if (grounded && !this.hurt) this.lastGrounded = time
-    const left = this.cursors.left.isDown || this.keys.A.isDown || this.touchControlIsDown('left')
-    const right = this.cursors.right.isDown || this.keys.D.isDown || this.touchControlIsDown('right')
+    const left = !controlsLocked && (this.cursors.left.isDown || this.keys.A.isDown || this.touchControlIsDown('left'))
+    const right = !controlsLocked && (this.cursors.right.isDown || this.keys.D.isDown || this.touchControlIsDown('right'))
     const direction = Number(right) - Number(left)
     if (!this.hurt) {
       this.player.setVelocityX(direction * SPEED)
       if (direction) this.player.setFlipX(direction < 0)
     }
-    this.updateCameraFocus(delta, direction)
-    if (!this.hurt && grounded && this.player.y < GROUND_Y - 8
+    this.updateCameraFocus(gameplayDelta, direction)
+    if (!controlsLocked && !this.hurt && grounded && this.player.y < GROUND_Y - 8
       && Phaser.Input.Keyboard.JustDown(this.cursors.down)) {
       this.dropThroughUntil = time + DROP_THROUGH_MS
       this.player.y += 4
@@ -1207,9 +1447,10 @@ class PrototypeScene extends Phaser.Scene {
     // Read every edge, including simultaneous keys, to avoid stale jump requests.
     const jumpEdges = [this.cursors.space, this.cursors.up, this.keys.W]
       .map(key => Phaser.Input.Keyboard.JustDown(key))
-    if (!this.hurt && jumpEdges.some(Boolean)) this.jumpQueued = time
-    const jumpHeld = this.cursors.space.isDown || this.cursors.up.isDown || this.keys.W.isDown
+    if (!controlsLocked && !this.hurt && jumpEdges.some(Boolean)) this.jumpQueued = time
+    const jumpHeld = !controlsLocked && (this.cursors.space.isDown || this.cursors.up.isDown || this.keys.W.isDown
       || this.touchControlIsDown('jump')
+    )
     if (!this.hurt && time - this.jumpQueued <= JUMP_BUFFER_MS && time - this.lastGrounded <= COYOTE_MS) {
       this.player.setVelocityY(-JUMP_SPEED)
       this.lastGrounded = -Infinity
@@ -1234,6 +1475,7 @@ class PrototypeScene extends Phaser.Scene {
         this.recycleBullet(bullet)
       }
     }
+    this.updateHealingWaves(time)
     for (const layer of this.layers) layer.sprite.tilePositionX = this.cameras.main.scrollX * layer.speed
     for (const projectileGroup of [this.enemyProjectiles, this.allyProjectiles, this.bossBasicArrows]) {
       for (const child of projectileGroup.getChildren()) {

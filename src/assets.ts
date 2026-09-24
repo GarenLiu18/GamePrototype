@@ -27,6 +27,10 @@ export const avatarActions = {
     'GunReload01', 'GunReload02', 'GunReload03', 'GunReload04', 'GunReload05',
     'GunReload06', 'GunReload07', 'GunReload08', 'GunReload09',
   ], false, 10),
+  ThrowUnderarm: action('Combat/ThrowUnderarm', [
+    'ThrowUnderarm01', 'ThrowUnderarm02', 'ThrowUnderarm03',
+    'ThrowUnderarm04', 'ThrowUnderarm05', 'ThrowUnderarm06',
+  ], false, 10),
   SwordComboA: action('Combat/SwordComboA', [
     'SwordCombo0101', 'SwordCombo0102', 'SwordCombo0103',
     'SwordCombo0104', 'SwordCombo0105', 'SwordCombo0106',
