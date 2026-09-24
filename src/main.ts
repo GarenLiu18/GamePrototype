@@ -20,11 +20,11 @@ const SOUL_ATTRACTION_RANGE = 192
 const SOUL_ABSORB_DURATION = 1000
 const BULLET_SPEED = 760
 const BULLET_LIFETIME_MS = 1400
-const HEAL_RANGE = 320
-const HEAL_AMOUNT = 10
-// The wave is three times faster than its previous 2x-arrow implementation.
-const HEAL_WAVE_SPEED_MULTIPLIER = 6
-const HEAL_WAVE_LIFETIME_MS = 1200
+const HEAL_RANGE = 360
+const HEAL_AMOUNT_PER_SECOND = 35
+const HEALER_MANA_MAX = 100
+const HEALER_MANA_COST_PER_SECOND = 20
+const HEALER_MANA_RECOVERY_PER_SECOND = 15
 // A fully enraged boss volley fires 30 arrows for 10 damage each. Keep one
 // arrow of buffer so that the last blocked arrow does not cause a guard break.
 const TANK_GUARD_MAX = combatConfig.boss.volleySize * 3 * combatConfig.enemyDamage + combatConfig.enemyDamage
@@ -111,6 +111,13 @@ class PrototypeScene extends Phaser.Scene {
   private playerBar!: HealthBar
   private tankGuardBar!: HealthBar
   private ammoSlots!: AmmoSlots
+  private healerManaBar!: HealthBar
+  private healerMana = HEALER_MANA_MAX
+  private channelingHeal = false
+  private healTarget: AllyUnit | null = null
+  private healAccumulator = 0
+  private nextHealTextAt = 0
+  private healBeam!: Phaser.GameObjects.Graphics
   private busBar!: HealthBar
   private invulnerableUntil = 0
   private hurt = false
@@ -190,6 +197,12 @@ class PrototypeScene extends Phaser.Scene {
     this.profession = 'gunner'
     this.blocking = false
     this.tankGuard = TANK_GUARD_MAX
+    this.healerMana = HEALER_MANA_MAX
+    this.channelingHeal = false
+    this.healTarget = null
+    this.healAccumulator = 0
+    this.nextHealTextAt = 0
+    this.healBeam?.clear()
     this.deployingBanner = false
     this.playerUsingStrugglePose = false
     this.primaryActionPointerId = null
@@ -268,6 +281,9 @@ class PrototypeScene extends Phaser.Scene {
     this.tankGuardBar.setVisible(false)
     this.ammoSlots = new AmmoSlots(this, 54, 3)
     this.ammoSlots.setVisible(this.profession === 'gunner')
+    this.healerManaBar = new HealthBar(this, 54, HEALER_MANA_MAX, '', 0x72e7c6, undefined, false)
+    this.healerManaBar.setVisible(false)
+    this.healBeam = this.add.graphics().setDepth(15)
     this.busBar = new HealthBar(this, 180, combatConfig.busHealth, '守護巴士', 0x7cb7ff)
     this.allyGroup = this.physics.add.group()
     this.enemyGroup = this.physics.add.group()
@@ -285,8 +301,6 @@ class PrototypeScene extends Phaser.Scene {
         hostile instanceof Enemy ? hostile.progression : undefined)
     })
     this.bullets = this.physics.add.group({ allowGravity: false, maxSize: 24 })
-    this.createHealingWaveTexture()
-    this.healingProjectiles = this.physics.add.group({ allowGravity: false, maxSize: 12 })
     const recyclePlayerBullet: Phaser.Types.Physics.Arcade.ArcadePhysicsCallback = projectile => {
       this.recycleBullet(projectile as Phaser.Physics.Arcade.Sprite)
     }
@@ -430,17 +444,6 @@ class PrototypeScene extends Phaser.Scene {
     this.spawnInitialForces()
   }
 
-  private createHealingWaveTexture(): void {
-    const key = 'effects/healing-wave'
-    if (this.textures.exists(key)) return
-    const graphics = this.make.graphics({ x: 0, y: 0 }, false)
-    graphics.fillStyle(0x2ae892, 0.22).fillCircle(10, 10, 10)
-    graphics.fillStyle(0x63ffc0, 0.85).fillCircle(10, 10, 6)
-    graphics.fillStyle(0xd9fff0, 1).fillCircle(10, 10, 3)
-    graphics.fillStyle(0x63ffc0, 0.8).fillTriangle(12, 5, 26, 10, 12, 15)
-    graphics.generateTexture(key, 28, 20)
-    graphics.destroy()
-  }
 
   private createBossRain(groundSolids: Phaser.Physics.Arcade.StaticGroup): void {
     this.bossRainArrows = this.physics.add.group({ allowGravity: false, maxSize: 160 })
@@ -664,8 +667,120 @@ class PrototypeScene extends Phaser.Scene {
     this.playAction('PushIdle')
   }
 
-  private tankGuardInputHeld(): boolean {
+  private attackInputHeld(): boolean {
     return this.touchControlIsDown('fire') || this.primaryActionPointerId !== null
+  }
+
+  private tankGuardInputHeld(): boolean {
+    return this.attackInputHeld()
+  }
+
+  private updateHealingChannel(delta: number, time: number): void {
+    const attackHeld = this.attackInputHeld()
+    const canHeal = this.profession === 'healer' && !this.professionMenuOpen
+      && !this.hurt && !this.gameEnded && attackHeld && this.healerMana > 0
+
+    if (!canHeal) {
+      this.channelingHeal = false
+      this.healTarget = null
+      this.healBeam?.clear()
+      if (this.profession === 'healer') {
+        this.healerMana = Math.min(HEALER_MANA_MAX,
+          this.healerMana + HEALER_MANA_RECOVERY_PER_SECOND * delta / 1000)
+      }
+      return
+    }
+
+    if (this.healTarget) {
+      const distance = Phaser.Math.Distance.Between(
+        this.player.x, this.player.y,
+        this.healTarget.sprite.x, this.healTarget.sprite.y,
+      )
+      if (this.healTarget.hp <= 0 || !this.healTarget.sprite.active
+        || this.healTarget.hp >= this.healTarget.maxHealth || distance > HEAL_RANGE) {
+        this.healTarget = null
+      }
+    }
+
+    if (!this.healTarget) {
+      const candidates = this.allies
+        .filter(ally => ally.hp > 0 && ally.sprite.active && ally.hp < ally.maxHealth)
+        .map(ally => ({
+          ally,
+          distance: Phaser.Math.Distance.Between(this.player.x, this.player.y, ally.sprite.x, ally.sprite.y),
+        }))
+        .filter(c => c.distance <= HEAL_RANGE)
+        .sort((a, b) => (a.ally.hp / a.ally.maxHealth) - (b.ally.hp / b.ally.maxHealth) || a.distance - b.distance)
+
+      this.healTarget = candidates[0]?.ally ?? null
+    }
+
+    if (!this.healTarget) {
+      this.channelingHeal = false
+      this.healBeam?.clear()
+      this.healerMana = Math.min(HEALER_MANA_MAX,
+        this.healerMana + HEALER_MANA_RECOVERY_PER_SECOND * delta / 1000)
+      return
+    }
+
+    this.channelingHeal = true
+    this.player.setVelocityX(0)
+    if (this.healTarget.sprite.x !== this.player.x) {
+      this.player.setFlipX(this.healTarget.sprite.x < this.player.x)
+    }
+    this.playAction('Struggle')
+
+    this.healerMana = Math.max(0, this.healerMana - HEALER_MANA_COST_PER_SECOND * delta / 1000)
+
+    const healAmount = HEAL_AMOUNT_PER_SECOND * delta / 1000
+    this.healAccumulator += healAmount
+    if (this.healAccumulator >= 1) {
+      const toHeal = Math.floor(this.healAccumulator)
+      this.healAccumulator -= toHeal
+      this.healTarget.heal(toHeal)
+    }
+
+    if (time >= this.nextHealTextAt) {
+      this.nextHealTextAt = time + 320
+      const textVal = Math.round(HEAL_AMOUNT_PER_SECOND * 0.32)
+      this.showFloatingHealText(this.healTarget.sprite.x, this.healTarget.sprite.y - 74, `+${textVal}`)
+    }
+
+    this.drawHealingBeam(time)
+
+    if (this.healTarget.hp >= this.healTarget.maxHealth) {
+      this.showFloatingHealText(this.healTarget.sprite.x, this.healTarget.sprite.y - 74, '已補滿', '#72e7c6')
+      this.healTarget = null
+    }
+  }
+
+  private drawHealingBeam(time: number): void {
+    if (!this.healBeam || !this.healTarget) return
+    this.healBeam.clear()
+    const fromX = this.player.x + (this.player.flipX ? -20 : 20)
+    const fromY = this.player.y - 42
+    const toX = this.healTarget.sprite.x
+    const toY = this.healTarget.sprite.y - 35
+
+    const alphaPulse = 0.5 + 0.3 * Math.sin(time / 80)
+    this.healBeam.lineStyle(6, 0x72e7c6, alphaPulse * 0.5)
+    this.healBeam.lineBetween(fromX, fromY, toX, toY)
+    this.healBeam.lineStyle(2, 0xffffff, alphaPulse)
+    this.healBeam.lineBetween(fromX, fromY, toX, toY)
+
+    const ringRadius = 14 + 3 * Math.sin(time / 100)
+    this.healBeam.lineStyle(2, 0x72e7c6, alphaPulse * 0.8)
+    this.healBeam.strokeCircle(toX, toY, ringRadius)
+  }
+
+  private showFloatingHealText(x: number, y: number, text: string, color = '#baffee'): void {
+    const value = this.add.text(x, y, text, {
+      fontFamily, fontSize: '14px', color, fontStyle: 'bold',
+    }).setOrigin(0.5).setDepth(25)
+    this.tweens.add({
+      targets: value, y: value.y - 18, alpha: 0, duration: 320, ease: 'Quad.Out',
+      onComplete: () => value.destroy(),
+    })
   }
 
   private get professionMenuOpen(): boolean {
@@ -747,6 +862,11 @@ class PrototypeScene extends Phaser.Scene {
     this.profession = profession
     this.blocking = false
     if (profession !== 'gunner') this.reloading = false
+    if (profession !== 'healer') {
+      this.channelingHeal = false
+      this.healTarget = null
+      this.healBeam?.clear()
+    }
     this.closeProfessionMenu()
   }
 
@@ -1008,11 +1128,7 @@ class PrototypeScene extends Phaser.Scene {
   private fire(): void {
     // Let the complete shot animation finish before accepting the next click.
     if (this.firing || this.hurt || this.gameEnded || this.professionMenuOpen) return
-    if (this.profession === 'healer') {
-      this.healLowestNearbyAlly()
-      return
-    }
-    if (this.profession === 'tank') return
+    if (this.profession === 'healer' || this.profession === 'tank') return
     if (this.reloading) return
     if (this.playerAmmo <= 0) {
       this.startReload()
@@ -1029,77 +1145,6 @@ class PrototypeScene extends Phaser.Scene {
     this.playAction(running ? 'GunRunFire' : 'GunFire')
   }
 
-  private healLowestNearbyAlly(): void {
-    const target = this.allies
-      .filter(ally => ally.hp > 0 && ally.sprite.active && ally.hp < ally.maxHealth)
-      .map(ally => ({
-        ally,
-        distance: Phaser.Math.Distance.Between(this.player.x, this.player.y, ally.sprite.x, ally.sprite.y),
-      }))
-      .filter(candidate => candidate.distance <= HEAL_RANGE)
-      .sort((a, b) => a.ally.hp - b.ally.hp || a.distance - b.distance)[0]?.ally
-    if (target) this.launchHealingWave(target)
-    this.firing = true
-    this.playAction('ThrowUnderarm')
-  }
-
-  private launchHealingWave(target: AllyUnit): boolean {
-    const direction = target.sprite.x >= this.player.x ? 1 : -1
-    const x = this.player.x + direction * 30
-    const y = this.player.y - 42
-    const wave = this.healingProjectiles.get(x, y, 'effects/healing-wave') as Phaser.Physics.Arcade.Sprite | null
-    if (!wave) return false
-    wave.setTexture('effects/healing-wave').setOrigin(0.36, 0.5).setDepth(12).setAlpha(1)
-      .setScale(1.25).setFlipX(false)
-    wave.enableBody(true, x, y, true, true)
-    wave.setSize(20, 14).setOffset(4, 3)
-    const body = wave.body as Phaser.Physics.Arcade.Body
-    body.setAllowGravity(true).setGravityY(combatConfig.projectileGravity - this.physics.world.gravity.y)
-    const velocity = ballisticVelocity(x, y, target.sprite.x, target.sprite.y - 42, HEAL_WAVE_SPEED_MULTIPLIER)
-    wave.setVelocity(velocity.x, velocity.y).setRotation(Math.atan2(velocity.y, velocity.x))
-    wave.setData('healTarget', target)
-    wave.setData('healAmount', HEAL_AMOUNT)
-    wave.setData('expiresAt', this.time.now + HEAL_WAVE_LIFETIME_MS)
-    return true
-  }
-
-  private recycleHealingWave(wave: Phaser.Physics.Arcade.Sprite): void {
-    wave.setData('healTarget', undefined)
-    wave.setData('healAmount', undefined)
-    wave.disableBody(true, true)
-  }
-
-  private finishHealingWave(wave: Phaser.Physics.Arcade.Sprite, target: AllyUnit): void {
-    const healed = target.heal(wave.getData('healAmount') as number)
-    this.recycleHealingWave(wave)
-    if (healed <= 0) return
-    const value = this.add.text(target.sprite.x, target.sprite.y - 74, `+${healed}`, {
-      fontFamily, fontSize: '15px', color: '#baffee', fontStyle: 'bold',
-    }).setOrigin(0.5).setDepth(13)
-    this.tweens.add({
-      targets: value, y: value.y - 16, alpha: 0, duration: 180, ease: 'Quad.Out',
-      onComplete: () => value.destroy(),
-    })
-  }
-
-  private updateHealingWaves(time: number): void {
-    for (const child of this.healingProjectiles.getChildren()) {
-      const wave = child as Phaser.Physics.Arcade.Sprite
-      if (!wave.active) continue
-      const target = wave.getData('healTarget') as AllyUnit | undefined
-      if (!target || target.hp <= 0 || !target.sprite.active || time >= wave.getData('expiresAt')) {
-        this.recycleHealingWave(wave)
-        continue
-      }
-      const distance = Phaser.Math.Distance.Between(target.sprite.x, target.sprite.y - 42, wave.x, wave.y)
-      if (distance <= 24) {
-        this.finishHealingWave(wave, target)
-        continue
-      }
-      const velocity = (wave.body as Phaser.Physics.Arcade.Body).velocity
-      wave.setRotation(Math.atan2(velocity.y, velocity.x))
-    }
-  }
 
   private startReload(): void {
     if (this.reloading || this.hurt || this.gameEnded || this.playerAmmo > 0) return
@@ -1396,7 +1441,9 @@ class PrototypeScene extends Phaser.Scene {
     for (const enemy of this.enemies) if (enemy.hp > 0) enemy.sprite.setVelocity(0).stop()
     this.boss.stop()
     for (const bullet of this.bullets.getChildren()) this.recycleBullet(bullet as Phaser.Physics.Arcade.Sprite)
-    for (const wave of this.healingProjectiles.getChildren()) this.recycleHealingWave(wave as Phaser.Physics.Arcade.Sprite)
+    this.channelingHeal = false
+    this.healTarget = null
+    this.healBeam?.clear()
     for (const arrow of this.allyProjectiles.getChildren()) this.recycleBullet(arrow as Phaser.Physics.Arcade.Sprite)
     for (const shot of this.enemyProjectiles.getChildren()) this.recycleBullet(shot as Phaser.Physics.Arcade.Sprite)
     for (const arrow of this.bossArrows.getChildren()) this.recycleBullet(arrow as Phaser.Physics.Arcade.Sprite)
@@ -1421,6 +1468,8 @@ class PrototypeScene extends Phaser.Scene {
     this.tankGuardBar.setVisible(this.profession === 'tank')
     this.ammoSlots.update(this.player.x, this.player.y - 70, this.playerAmmo, this.reloading)
     this.ammoSlots.setVisible(this.profession === 'gunner')
+    this.healerManaBar.update(this.player.x, this.player.y - 70, Math.ceil(this.healerMana))
+    this.healerManaBar.setVisible(this.profession === 'healer')
     this.busBar.update(this.bus.x, this.bus.y - this.bus.displayHeight - 17, this.busHp)
     const melee = this.enemies.filter(enemy => enemy.hp > 0 && enemy.kind === 'melee').length
     const ranged = this.enemies.filter(enemy => enemy.hp > 0 && enemy.kind === 'ranged').length
@@ -1435,7 +1484,12 @@ class PrototypeScene extends Phaser.Scene {
         : this.tankGuardInputHeld()
           ? `體幹破裂 · 體幹 ${Math.ceil(this.tankGuard)} / ${TANK_GUARD_MAX}`
           : `鬆開回復 · 體幹 ${Math.ceil(this.tankGuard)} / ${TANK_GUARD_MAX}` : healing
-        ? `治療 +${HEAL_AMOUNT} · 範圍 ${HEAL_RANGE}` : this.reloading ? '換彈中…' : `彈藥 ${this.playerAmmo} / 3`)
+        ? (this.channelingHeal && this.healTarget
+          ? `治療中 · 魔力 ${Math.ceil(this.healerMana)} / ${HEALER_MANA_MAX}`
+          : this.healerMana < 5
+            ? `魔力枯竭 · 魔力 ${Math.ceil(this.healerMana)} / ${HEALER_MANA_MAX}`
+            : `按住治療 · 魔力 ${Math.ceil(this.healerMana)} / ${HEALER_MANA_MAX}`)
+        : this.reloading ? '換彈中…' : `彈藥 ${this.playerAmmo} / 3`)
   }
 
   private updateBossHud(): void {
@@ -1539,6 +1593,7 @@ class PrototypeScene extends Phaser.Scene {
         || Phaser.Input.Keyboard.JustDown(this.enterKey)) this.selectProfessionBySelection()
     }
     this.updateBlocking(gameplayDelta)
+    this.updateHealingChannel(gameplayDelta, time)
     if (!this.gameEnded && !controlsLocked) this.updateAllyBanner()
     this.updateHealthDisplay()
     this.updateBossHud()
@@ -1561,9 +1616,10 @@ class PrototypeScene extends Phaser.Scene {
     const body = this.player.body as Phaser.Physics.Arcade.Body
     let grounded = body.blocked.down || body.touching.down
     if (grounded && !this.hurt) this.lastGrounded = time
-    const left = !controlsLocked && !this.blocking && !this.deployingBanner && this.soulsBeingAbsorbed.size === 0
+    const channelLocked = this.blocking || this.channelingHeal || this.deployingBanner || this.soulsBeingAbsorbed.size > 0
+    const left = !controlsLocked && !channelLocked
       && (this.cursors.left.isDown || this.keys.A.isDown || this.touchControlIsDown('left'))
-    const right = !controlsLocked && !this.blocking && !this.deployingBanner && this.soulsBeingAbsorbed.size === 0
+    const right = !controlsLocked && !channelLocked
       && (this.cursors.right.isDown || this.keys.D.isDown || this.touchControlIsDown('right'))
     const direction = Number(right) - Number(left)
     if (!this.hurt) {
@@ -1572,7 +1628,7 @@ class PrototypeScene extends Phaser.Scene {
     }
     this.updateSoulAbsorption(time)
     this.updateCameraFocus(gameplayDelta, direction)
-    if (!controlsLocked && !this.blocking && !this.deployingBanner && this.soulsBeingAbsorbed.size === 0 && !this.hurt && grounded && this.player.y < GROUND_Y - 8
+    if (!controlsLocked && !channelLocked && !this.hurt && grounded && this.player.y < GROUND_Y - 8
       && Phaser.Input.Keyboard.JustDown(this.cursors.down)) {
       this.dropThroughUntil = time + DROP_THROUGH_MS
       this.player.y += 4
@@ -1583,23 +1639,23 @@ class PrototypeScene extends Phaser.Scene {
     // Read every edge, including simultaneous keys, to avoid stale jump requests.
     const jumpEdges = [this.cursors.space, this.cursors.up, this.keys.W]
       .map(key => Phaser.Input.Keyboard.JustDown(key))
-    if (!controlsLocked && !this.blocking && !this.deployingBanner && this.soulsBeingAbsorbed.size === 0 && !this.hurt && jumpEdges.some(Boolean)) this.jumpQueued = time
-    const jumpHeld = !controlsLocked && !this.blocking && !this.deployingBanner && this.soulsBeingAbsorbed.size === 0 && (this.cursors.space.isDown || this.cursors.up.isDown || this.keys.W.isDown
+    if (!controlsLocked && !channelLocked && !this.hurt && jumpEdges.some(Boolean)) this.jumpQueued = time
+    const jumpHeld = !controlsLocked && !channelLocked && (this.cursors.space.isDown || this.cursors.up.isDown || this.keys.W.isDown
       || this.touchControlIsDown('jump')
     )
-    if (!this.blocking && !this.deployingBanner && this.soulsBeingAbsorbed.size === 0 && !this.hurt && time - this.jumpQueued <= JUMP_BUFFER_MS && time - this.lastGrounded <= COYOTE_MS) {
+    if (!channelLocked && !this.hurt && time - this.jumpQueued <= JUMP_BUFFER_MS && time - this.lastGrounded <= COYOTE_MS) {
       this.player.setVelocityY(-JUMP_SPEED)
       this.lastGrounded = -Infinity
       this.jumpQueued = -Infinity
       this.jumpReleased = false
     }
     // Releasing early produces a shorter jump.
-    if (!this.blocking && !this.deployingBanner && this.soulsBeingAbsorbed.size === 0 && !this.hurt && !jumpHeld && !this.jumpReleased && body.velocity.y < -240) {
+    if (!channelLocked && !this.hurt && !jumpHeld && !this.jumpReleased && body.velocity.y < -240) {
       this.player.setVelocityY(-240)
       this.jumpReleased = true
     }
     // Shooting owns the animation temporarily, while movement physics continue.
-    if (!this.firing && !this.reloading && !this.hurt && !this.blocking && !this.deployingBanner && this.soulsBeingAbsorbed.size === 0) {
+    if (!this.firing && !this.reloading && !this.hurt && !channelLocked) {
       if (body.velocity.y < -80) this.playAction('JumpRise')
       else if (!grounded && body.velocity.y > 80) this.playAction('JumpFall')
       else if (!grounded) this.playAction('JumpMid')
@@ -1611,7 +1667,6 @@ class PrototypeScene extends Phaser.Scene {
         this.recycleBullet(bullet)
       }
     }
-    this.updateHealingWaves(time)
     for (const layer of this.layers) layer.sprite.tilePositionX = this.cameras.main.scrollX * layer.speed
     for (const projectileGroup of [this.enemyProjectiles, this.allyProjectiles, this.bossBasicArrows]) {
       for (const child of projectileGroup.getChildren()) {
