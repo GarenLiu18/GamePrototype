@@ -47,6 +47,9 @@ export const avatarActions = {
   Die: action('Die', [
     'Die01', 'Die02', 'Die03', 'Die04', 'Die05', 'Die06', 'Die07', 'Die08', 'Die09',
   ], false),
+  Spin: action('Spin', [
+    'Spin01', 'Spin02', 'Spin03', 'Spin04', 'Spin05', 'Spin06', 'Spin07', 'Spin08',
+  ], false, 14),
 }
 
 export const bulletAction = action('Weapons/Bullet', ['Bullet01', 'Bullet02'], true, 20)

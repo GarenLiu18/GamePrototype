@@ -146,10 +146,25 @@ class PrototypeScene extends Phaser.Scene {
   private deployingBanner = false
   private playerUsingStrugglePose = false
   private primaryActionPointerId: number | null = null
-  private professionMenu?: Phaser.GameObjects.Container
-  private professionMenuSelection = 0
-  private professionMenuButtons: Phaser.GameObjects.Rectangle[] = []
-  private professionMenuLabels: Phaser.GameObjects.Text[] = []
+  private uiContainer!: Phaser.GameObjects.Container
+  private bottomHintText!: Phaser.GameObjects.Text
+  private rouletteContainer?: Phaser.GameObjects.Container
+  private rouletteWheelDisc?: Phaser.GameObjects.Container
+  private roulettePointer?: Phaser.GameObjects.Triangle
+  private rouletteBadges: {
+    container: Phaser.GameObjects.Container
+    bg: Phaser.GameObjects.Rectangle
+    text: Phaser.GameObjects.Text
+    indicator: Phaser.GameObjects.Arc
+    profession: Profession
+  }[] = []
+  private rouletteSelection = 0
+  private wheelTargetAngle = 0
+  private isRouletteOpen = false
+  private isTransforming = false
+  private cameraTargetZoom = 1.0
+  private cameraTargetScrollY = 0
+  private lastProfessionButtonPressTime = -1
   private touchControlPointers = new Map<number, TouchControl>()
   private bannerActionQueued = false
   private fullscreenLabel!: Phaser.GameObjects.Text
@@ -206,8 +221,16 @@ class PrototypeScene extends Phaser.Scene {
     this.deployingBanner = false
     this.playerUsingStrugglePose = false
     this.primaryActionPointerId = null
-    this.professionMenu?.destroy()
-    this.professionMenu = undefined
+    this.isRouletteOpen = false
+    this.isTransforming = false
+    this.rouletteContainer?.destroy()
+    this.rouletteContainer = undefined
+    this.rouletteBadges = []
+    this.rouletteWheelDisc = undefined
+    this.roulettePointer = undefined
+    this.cameraTargetZoom = 1.0
+    this.cameraTargetScrollY = 0
+    this.lastProfessionButtonPressTime = -1
     this.setCombatTimeScale(1)
     this.bossRainActive = false
     this.bossHudVisible = false
@@ -422,6 +445,21 @@ class PrototypeScene extends Phaser.Scene {
       }
       if (animation.key === avatarActions.GroundSlam.key) this.deployingBanner = false
     })
+    const onKeyDown = (event: KeyboardEvent) => {
+      if (this.gameEnded || this.isTransforming || event.repeat) return
+      if (!this.isRouletteOpen) {
+        if (event.key === 'q' || event.key === 'Q') {
+          this.openProfessionRoulette()
+        }
+      } else {
+        if (event.key === 'q' || event.key === 'Q') {
+          this.cycleProfessionRoulette()
+        } else {
+          this.confirmProfessionRoulette()
+        }
+      }
+    }
+    this.input.keyboard?.on('keydown', onKeyDown)
     this.input.on('pointerdown', this.onPointerDown, this)
     this.input.on('pointerup', this.onPointerUp, this)
     this.input.on('pointerupoutside', this.onPointerUp, this)
@@ -429,6 +467,7 @@ class PrototypeScene extends Phaser.Scene {
       this.input.off('pointerdown', this.onPointerDown, this)
       this.input.off('pointerup', this.onPointerUp, this)
       this.input.off('pointerupoutside', this.onPointerUp, this)
+      this.input.keyboard?.off('keydown', onKeyDown)
     })
     this.playAction('Idle')
     this.cursors = this.input.keyboard!.createCursorKeys()
@@ -436,8 +475,10 @@ class PrototypeScene extends Phaser.Scene {
     this.enterKey = this.input.keyboard!.addKey(Phaser.Input.Keyboard.KeyCodes.ENTER)
     this.input.keyboard!.addCapture(['SPACE', 'UP', 'DOWN', 'LEFT', 'RIGHT'])
     const camera = this.cameras.main
-    camera.setBounds(0, 0, WORLD_WIDTH, 540)
+    camera.setBounds(-600, -300, WORLD_WIDTH + 1200, 1100)
     camera.setScroll(0, 0)
+    camera.setZoom(1.0)
+    this.uiContainer = this.add.container(0, 0).setScrollFactor(0).setDepth(150)
     this.createHud()
     this.createTouchControls()
     this.createFullscreenButton()
@@ -512,7 +553,8 @@ class PrototypeScene extends Phaser.Scene {
   }
 
   private createHud(): void {
-    const hud = this.add.container(0, 0).setScrollFactor(0).setDepth(100)
+    const hud = this.add.container(0, 0)
+    this.uiContainer.add(hud)
     const text = (x: number, y: number, value: string, size: number, color: string) =>
       this.add.text(x, y, value, { fontFamily, fontSize: `${size}px`, color })
     hud.add(this.add.rectangle(480, 42, 960, 84, 0x090f20, 0.93))
@@ -546,7 +588,8 @@ class PrototypeScene extends Phaser.Scene {
     hud.add(this.healthText)
 
     hud.add(this.add.rectangle(480, 521, 960, 38, 0x090f20, 0.95))
-    hud.add(text(24, 511, 'A D / ← → 移動    SPACE / W / ↑ 跳躍    E 旗幟    X 吸魂    Q / 職 選擇    攻 / 滑鼠左鍵 行動    R 重來', 12, '#b0c2d6'))
+    this.bottomHintText = text(24, 511, 'A D / ← → 移動    SPACE / W / ↑ 跳躍    E 旗幟    X 吸魂    Q / 職 選擇    攻 / 滑鼠左鍵 行動    R 重來', 12, '#b0c2d6')
+    hud.add(this.bottomHintText)
     this.professionText = text(560, 511, '', 12, '#a0e6da').setOrigin(1, 0).setVisible(false)
     hud.add(this.professionText)
     this.ammoText = text(705, 511, '', 12, '#a0e6da').setOrigin(1, 0)
@@ -558,10 +601,11 @@ class PrototypeScene extends Phaser.Scene {
   private createTouchControls(): void {
     const addButton = (x: number, y: number, label: string, control: TouchControl, color: number) => {
       const button = this.add.circle(x, y, 32, 0x09111e, 0.78)
-        .setStrokeStyle(2, color, 0.95).setScrollFactor(0).setDepth(120).setInteractive()
-      this.add.text(x, y, label, {
+        .setStrokeStyle(2, color, 0.95).setInteractive()
+      const labelText = this.add.text(x, y, label, {
         fontFamily, fontSize: label.length > 1 ? '13px' : '18px', color: '#f4fbff', fontStyle: 'bold',
-      }).setOrigin(0.5).setScrollFactor(0).setDepth(121)
+      }).setOrigin(0.5)
+      this.uiContainer.add([button, labelText])
       button.on('pointerdown', (pointer: Phaser.Input.Pointer, _x: number, _y: number,
         event: Phaser.Types.Input.EventData) => {
         event.stopPropagation()
@@ -581,10 +625,11 @@ class PrototypeScene extends Phaser.Scene {
 
   private createFullscreenButton(): void {
     const button = this.add.rectangle(846, 42, 176, 48, 0x132238, 0.92)
-      .setStrokeStyle(2, 0x71d9cf, 0.9).setScrollFactor(0).setDepth(120).setInteractive()
+      .setStrokeStyle(2, 0x71d9cf, 0.9).setInteractive()
     this.fullscreenLabel = this.add.text(846, 42, '全螢幕', {
       fontFamily, fontSize: '22px', color: '#d8fffa', fontStyle: 'bold',
-    }).setOrigin(0.5).setScrollFactor(0).setDepth(121)
+    }).setOrigin(0.5)
+    this.uiContainer.add([button, this.fullscreenLabel])
     button.on('pointerdown', (_pointer: Phaser.Input.Pointer, _x: number, _y: number,
       event: Phaser.Types.Input.EventData) => {
       event.stopPropagation()
@@ -623,7 +668,8 @@ class PrototypeScene extends Phaser.Scene {
 
   private createTouchRipple(x: number, y: number, color: number): void {
     const ripple = this.add.circle(x, y, 17, color, 0.14)
-      .setStrokeStyle(2, color, 0.9).setScrollFactor(0).setDepth(122)
+      .setStrokeStyle(2, color, 0.9)
+    this.uiContainer.add(ripple)
     this.tweens.add({
       targets: ripple, scale: 1.9, alpha: 0, duration: 260, ease: 'Quad.Out',
       onComplete: () => ripple.destroy(),
@@ -632,15 +678,24 @@ class PrototypeScene extends Phaser.Scene {
 
   private pressTouchControl(control: TouchControl, pointer: Phaser.Input.Pointer): void {
     this.touchControlPointers.set(pointer.id, control)
-    if (control === 'jump' || (control === 'up' && !this.professionMenuOpen)) this.jumpQueued = this.time.now
-    if (control === 'up' && this.professionMenuOpen) this.moveProfessionMenuSelection(-1)
-    if (control === 'down' && this.professionMenuOpen) this.moveProfessionMenuSelection(1)
-    if (control === 'fire') {
-      if (this.professionMenuOpen) this.selectProfessionBySelection()
-      else this.fire()
+    if (this.isRouletteOpen) {
+      if (control === 'profession') {
+        this.lastProfessionButtonPressTime = this.time.now
+        this.cycleProfessionRoulette()
+      } else {
+        this.confirmProfessionRoulette()
+      }
+      return
     }
+    if (this.isTransforming) return
+
+    if (control === 'jump' || control === 'up') this.jumpQueued = this.time.now
+    if (control === 'fire') this.fire()
     if (control === 'banner') this.bannerActionQueued = true
-    if (control === 'profession') this.toggleProfessionMenu()
+    if (control === 'profession') {
+      this.lastProfessionButtonPressTime = this.time.now
+      this.openProfessionRoulette()
+    }
   }
 
   private onPointerUp(pointer: Phaser.Input.Pointer): void {
@@ -784,7 +839,7 @@ class PrototypeScene extends Phaser.Scene {
   }
 
   private get professionMenuOpen(): boolean {
-    return Boolean(this.professionMenu?.active)
+    return this.isRouletteOpen || this.isTransforming
   }
 
   private setCombatTimeScale(scale: number): void {
@@ -793,69 +848,359 @@ class PrototypeScene extends Phaser.Scene {
     this.physics.world.timeScale = 1 / scale
     this.time.timeScale = scale
     this.anims.globalTimeScale = scale
-    this.tweens.timeScale = scale
+    this.tweens.timeScale = 1
   }
 
-  private toggleProfessionMenu(): void {
-    if (this.gameEnded) return
-    if (this.professionMenuOpen) {
-      this.closeProfessionMenu()
-      return
-    }
+  private openProfessionRoulette(): void {
+    if (this.gameEnded || this.isTransforming || this.isRouletteOpen) return
     this.firing = false
+    this.reloading = false
+    this.blocking = false
+    this.channelingHeal = false
+    this.healTarget = null
+    this.healBeam?.clear()
     this.player.setVelocityX(0)
-    this.professionMenuSelection = professions.indexOf(this.profession)
-    this.professionMenuButtons = []
-    this.professionMenuLabels = []
-    const panel = this.add.container(480, 265).setScrollFactor(0).setDepth(200)
-    panel.add(this.add.rectangle(0, 0, 320, 286, 0x09111e, 0.97)
-      .setStrokeStyle(2, 0x72e7c6, 0.95))
-    panel.add(this.add.text(0, -112, '選擇', {
-      fontFamily, fontSize: '26px', color: '#eafffb', fontStyle: 'bold',
-    }).setOrigin(0.5))
-    const addChoice = (index: number, profession: Profession) => {
-      const y = -52 + index * 58
-      const button = this.add.rectangle(0, y, 240, 48, 0x132238, 0.98)
-        .setStrokeStyle(2, professionColors[profession], 0.95).setInteractive({ useHandCursor: true })
-      button.on('pointerdown', (_pointer: Phaser.Input.Pointer, _x: number, _y: number,
-        event: Phaser.Types.Input.EventData) => {
-        event.stopPropagation()
-        this.selectProfession(profession)
-      })
-      panel.add(button)
-      this.professionMenuButtons.push(button)
-      const label = this.add.text(0, y, professionNames[profession], {
-        fontFamily, fontSize: '19px', color: '#f4fbff', fontStyle: 'bold',
-      }).setOrigin(0.5)
-      panel.add(label)
-      this.professionMenuLabels.push(label)
-    }
-    professions.forEach((profession, index) => addChoice(index, profession))
-    panel.add(this.add.text(0, 116, '↑ / ↓ 或 W / S 選擇　○ / Enter / 空白鍵確認', {
-      fontFamily, fontSize: '12px', color: '#8ca3bc',
-    }).setOrigin(0.5))
-    this.professionMenu = panel
-    this.refreshProfessionMenuSelection()
+    this.isRouletteOpen = true
+    this.rouletteSelection = professions.indexOf(this.profession)
+    this.wheelTargetAngle = -this.rouletteSelection * (2 * Math.PI / 3)
+
+    // Camera target zoom & center
+    this.cameraTargetZoom = 2.4
+    this.cameraTargetScrollY = this.player.y - 45 - 270
+
+    // Slow down time during selection
     this.setCombatTimeScale(PROFESSION_MENU_TIME_SCALE)
+
+    // Update bottom HUD hint
+    this.bottomHintText?.setText('Q / 職：切換職業　　任意其他鍵 / 點擊：確認切換')
+
+    // Create the roulette above the player's head
+    this.createRouletteContainer()
   }
 
-  private moveProfessionMenuSelection(direction: -1 | 1): void {
-    if (!this.professionMenuOpen) return
-    this.professionMenuSelection = Phaser.Math.Wrap(this.professionMenuSelection + direction, 0, professions.length)
-    this.refreshProfessionMenuSelection()
+  private createRouletteContainer(): void {
+    this.rouletteContainer?.destroy()
+    this.rouletteBadges = []
+
+    const container = this.add.container(this.player.x, this.player.y - 84).setDepth(200)
+
+    // 1. Rotating Wheel Disc
+    const wheelDisc = this.add.container(0, 0)
+    container.add(wheelDisc)
+    this.rouletteWheelDisc = wheelDisc
+
+    // Outer circular dial backdrop
+    const discBg = this.add.circle(0, 0, 52, 0x09111e, 0.94)
+      .setStrokeStyle(2, 0x324b68, 0.9)
+    wheelDisc.add(discBg)
+
+    // Futuristic tech decorative rings
+    const innerRing = this.add.graphics()
+    innerRing.lineStyle(1.5, 0x1f344d, 0.8)
+    innerRing.strokeCircle(0, 0, 36)
+    innerRing.lineStyle(1, 0x152538, 0.6)
+    innerRing.strokeCircle(0, 0, 20)
+    wheelDisc.add(innerRing)
+
+    // Center core hub
+    const centerCore = this.add.circle(0, 0, 12, 0x070d17, 1)
+      .setStrokeStyle(1.5, professionColors[this.profession], 0.9)
+    wheelDisc.add(centerCore)
+    const coreDot = this.add.circle(0, 0, 4, professionColors[this.profession], 1)
+    wheelDisc.add(coreDot)
+
+    // Profession slots/badges at 120-degree intervals
+    const radius = 38
+    professions.forEach((prof, index) => {
+      // Slot 0 at -90 deg (top), slot 1 at 30 deg, slot 2 at 150 deg
+      const baseAngle = -Math.PI / 2 + index * (2 * Math.PI / 3)
+      const bx = Math.cos(baseAngle) * radius
+      const by = Math.sin(baseAngle) * radius
+
+      const badgeContainer = this.add.container(bx, by)
+      const bg = this.add.rectangle(0, 0, 52, 22, 0x101b2b, 0.95)
+        .setStrokeStyle(1.5, professionColors[prof], 0.7)
+      const indicator = this.add.circle(-16, 0, 3, professionColors[prof], 0.9)
+      const label = this.add.text(4, 0, professionNames[prof], {
+        fontFamily, fontSize: '11px', color: '#f4fbff', fontStyle: 'bold',
+      }).setOrigin(0.5)
+
+      badgeContainer.add([bg, indicator, label])
+      wheelDisc.add(badgeContainer)
+
+      this.rouletteBadges.push({
+        container: badgeContainer,
+        bg,
+        text: label,
+        indicator,
+        profession: prof,
+      })
+    })
+
+    // Align rotation to currently selected profession
+    wheelDisc.rotation = this.wheelTargetAngle
+    for (const b of this.rouletteBadges) {
+      b.container.setRotation(-wheelDisc.rotation)
+    }
+
+    // 2. Fixed Pointer at the top
+    const pointerColor = professionColors[professions[this.rouletteSelection]]
+    const pointer = this.add.triangle(0, -60, 0, 5, -6, -5, 6, -5, pointerColor)
+      .setDepth(201)
+    container.add(pointer)
+    this.roulettePointer = pointer
+
+    this.tweens.add({
+      targets: pointer,
+      y: -57,
+      duration: 350,
+      yoyo: true,
+      repeat: -1,
+      ease: 'Sine.easeInOut',
+    })
+
+    // 3. Instruction Tag below wheel
+    const promptContainer = this.add.container(0, 64)
+    const promptBg = this.add.rectangle(0, 0, 164, 20, 0x09111e, 0.92)
+      .setStrokeStyle(1, 0x71d9cf, 0.8)
+    const promptText = this.add.text(0, 0, 'Q / 職：切換　任意鍵：確認', {
+      fontFamily, fontSize: '10px', color: '#a0e6da',
+    }).setOrigin(0.5)
+    promptContainer.add([promptBg, promptText])
+    container.add(promptContainer)
+
+    // Entrance animation
+    container.setScale(0.3)
+    container.setAlpha(0)
+    this.tweens.add({
+      targets: container,
+      scale: 1,
+      alpha: 1,
+      duration: 220,
+      ease: 'Back.easeOut',
+    })
+
+    this.rouletteContainer = container
+    this.refreshRouletteVisuals()
   }
 
-  private refreshProfessionMenuSelection(): void {
-    for (const [index, button] of this.professionMenuButtons.entries()) {
-      const selected = index === this.professionMenuSelection
-      button.setFillStyle(selected ? 0x173c43 : 0x132238, 0.98)
-      button.setScale(selected ? 1.04 : 1)
-      this.professionMenuLabels[index]?.setText(`${selected ? '▶ ' : ''}${professionNames[professions[index]]}`)
+
+  private cycleProfessionRoulette(): void {
+    if (!this.isRouletteOpen || this.isTransforming) return
+    this.rouletteSelection = (this.rouletteSelection + 1) % professions.length
+    this.wheelTargetAngle -= (2 * Math.PI / 3)
+
+    if (this.rouletteWheelDisc) {
+      this.tweens.killTweensOf(this.rouletteWheelDisc)
+      this.tweens.add({
+        targets: this.rouletteWheelDisc,
+        rotation: this.wheelTargetAngle,
+        duration: 220,
+        ease: 'Back.easeOut',
+        onUpdate: () => {
+          for (const badge of this.rouletteBadges) {
+            badge.container.setRotation(-this.rouletteWheelDisc!.rotation)
+          }
+        },
+        onComplete: () => {
+          if (this.rouletteSelection === 0 && this.rouletteWheelDisc) {
+            this.wheelTargetAngle = 0
+            this.rouletteWheelDisc.rotation = 0
+            for (const badge of this.rouletteBadges) {
+              badge.container.setRotation(0)
+            }
+          }
+        },
+      })
+    }
+
+    this.refreshRouletteVisuals()
+  }
+
+  private refreshRouletteVisuals(): void {
+    const activeProf = professions[this.rouletteSelection]
+    const activeColor = professionColors[activeProf]
+
+    if (this.roulettePointer) {
+      this.roulettePointer.setFillStyle(activeColor)
+    }
+
+    for (const [index, badge] of this.rouletteBadges.entries()) {
+      const selected = index === this.rouletteSelection
+      badge.bg.setFillStyle(selected ? 0x17314a : 0x101b2b, 0.95)
+      badge.bg.setStrokeStyle(selected ? 2.5 : 1, professionColors[badge.profession], selected ? 1 : 0.4)
+      badge.container.setScale(selected ? 1.16 : 0.88)
+      badge.text.setColor(selected ? '#ffffff' : '#738ca3')
+      badge.indicator.setAlpha(selected ? 1 : 0.4)
     }
   }
 
-  private selectProfessionBySelection(): void {
-    this.selectProfession(professions[this.professionMenuSelection])
+  private confirmProfessionRoulette(): void {
+    if (!this.isRouletteOpen || this.isTransforming) return
+
+    const chosenProfession = professions[this.rouletteSelection]
+    this.isRouletteOpen = false
+    this.isTransforming = true
+
+    // Restore bottom hint
+    this.bottomHintText?.setText('A D / ← → 移動    SPACE / W / ↑ 跳躍    E 旗幟    X 吸魂    Q / 職 選擇    攻 / 滑鼠左鍵 行動    R 重來')
+
+    // Fade out and dismiss roulette container
+    if (this.rouletteContainer) {
+      this.tweens.add({
+        targets: this.rouletteContainer,
+        scale: 1.25,
+        alpha: 0,
+        duration: 160,
+        ease: 'Quad.easeIn',
+        onComplete: () => {
+          this.rouletteContainer?.destroy()
+          this.rouletteContainer = undefined
+          this.rouletteBadges = []
+          this.rouletteWheelDisc = undefined
+          this.roulettePointer = undefined
+        },
+      })
+    }
+
+    // Restore full game speed for the spin animation and shockwave
+    this.setCombatTimeScale(1)
+
+    // Stop player and freeze physics temporarily
+    this.player.setVelocityX(0)
+    this.player.setVelocityY(0)
+    const body = this.player.body as Phaser.Physics.Arcade.Body
+    body.allowGravity = false
+
+    // Apply the newly chosen profession
+    this.selectProfession(chosenProfession)
+
+    // Invulnerability during transformation
+    this.invulnerableUntil = Math.max(this.invulnerableUntil, this.time.now + 1200)
+
+    // Play Spin animation!
+    this.playAction('Spin')
+
+    // Create radiant light wave shockwave effect!
+    this.createLightWaveEffect(this.player.x, this.player.y - 10, professionColors[this.profession])
+
+    // Delay camera zoom-out until the spin finishes
+    this.time.delayedCall(450, () => {
+      this.cameraTargetZoom = 1.0
+      this.cameraTargetScrollY = 0
+    })
+
+    // Return control to player when spin animation completes
+    this.time.delayedCall(650, () => {
+      body.allowGravity = true
+      this.isTransforming = false
+      if (!this.hurt && this.playerHp > 0) {
+        this.playAction('Idle')
+      }
+    })
+  }
+
+  private createLightWaveEffect(x: number, y: number, color: number): void {
+    const shockwave = this.add.graphics().setDepth(80)
+    const duration = 650
+    const maxRadius = 140
+
+    const waveData = { radius: 10, alpha: 1, thickness: 6 }
+    this.tweens.add({
+      targets: waveData,
+      radius: maxRadius,
+      alpha: 0,
+      thickness: 1,
+      duration,
+      ease: 'Cubic.easeOut',
+      onUpdate: () => {
+        shockwave.clear()
+        // Outer colored glow ring
+        shockwave.lineStyle(waveData.thickness * 2, color, waveData.alpha * 0.5)
+        shockwave.strokeCircle(x, y, waveData.radius)
+        // Inner bright core ring
+        shockwave.lineStyle(waveData.thickness, 0xffffff, waveData.alpha * 0.9)
+        shockwave.strokeCircle(x, y, waveData.radius * 0.85)
+        // Ground plane shockwave ellipse
+        shockwave.lineStyle(waveData.thickness * 1.5, color, waveData.alpha * 0.6)
+        shockwave.strokeEllipse(x, y + 20, waveData.radius * 2.2, waveData.radius * 0.6)
+      },
+      onComplete: () => shockwave.destroy(),
+    })
+
+    // Second delayed outer ripple
+    const ripple = this.add.graphics().setDepth(79)
+    const rippleData = { radius: 5, alpha: 0.8 }
+    this.tweens.add({
+      targets: rippleData,
+      radius: maxRadius * 1.4,
+      alpha: 0,
+      delay: 100,
+      duration,
+      ease: 'Quad.easeOut',
+      onUpdate: () => {
+        ripple.clear()
+        ripple.lineStyle(2, color, rippleData.alpha * 0.7)
+        ripple.strokeCircle(x, y, rippleData.radius)
+        ripple.lineStyle(1.5, 0xffffff, rippleData.alpha * 0.4)
+        ripple.strokeEllipse(x, y + 20, rippleData.radius * 2.4, rippleData.radius * 0.5)
+      },
+      onComplete: () => ripple.destroy(),
+    })
+
+    // Central radiant flash
+    const flash = this.add.circle(x, y, 16, 0xffffff, 0.95).setDepth(81).setBlendMode(Phaser.BlendModes.ADD)
+    this.tweens.add({
+      targets: flash,
+      scale: 3.5,
+      alpha: 0,
+      duration: 350,
+      ease: 'Quad.easeOut',
+      onComplete: () => flash.destroy(),
+    })
+
+    // Spark particles bursting outward
+    const particleCount = 18
+    for (let i = 0; i < particleCount; i++) {
+      const angle = (i / particleCount) * Math.PI * 2 + (Math.random() - 0.5) * 0.3
+      const speed = Phaser.Math.Between(100, 240)
+      const sparkColor = Math.random() > 0.3 ? color : 0xffffff
+      const size = Phaser.Math.Between(2, 4)
+      const spark = this.add.circle(x, y, size, sparkColor, 1).setDepth(82).setBlendMode(Phaser.BlendModes.ADD)
+      const vx = Math.cos(angle) * speed
+      const vy = Math.sin(angle) * speed * 0.75 - 30
+      this.tweens.add({
+        targets: spark,
+        x: x + vx * 0.45,
+        y: y + vy * 0.45,
+        scale: 0.2,
+        alpha: 0,
+        duration: Phaser.Math.Between(400, 650),
+        ease: 'Cubic.easeOut',
+        onComplete: () => spark.destroy(),
+      })
+    }
+
+    // Floating announcement tag
+    const jobName = professionNames[this.profession]
+    const tagContainer = this.add.container(x, y - 45).setDepth(90)
+    const tagBg = this.add.rectangle(0, 0, 110, 26, 0x09111e, 0.92)
+      .setStrokeStyle(1.5, color, 0.95)
+    const tagText = this.add.text(0, 0, `轉職：${jobName}`, {
+      fontFamily, fontSize: '13px', color: '#f4fbff', fontStyle: 'bold',
+    }).setOrigin(0.5)
+    tagContainer.add([tagBg, tagText])
+    tagContainer.setScale(0.7)
+    this.tweens.add({
+      targets: tagContainer,
+      y: y - 80,
+      scale: 1.05,
+      alpha: 0,
+      delay: 300,
+      duration: 550,
+      ease: 'Cubic.easeOut',
+      onComplete: () => tagContainer.destroy(),
+    })
   }
 
   private selectProfession(profession: Profession): void {
@@ -867,15 +1212,6 @@ class PrototypeScene extends Phaser.Scene {
       this.healTarget = null
       this.healBeam?.clear()
     }
-    this.closeProfessionMenu()
-  }
-
-  private closeProfessionMenu(): void {
-    this.professionMenu?.destroy()
-    this.professionMenu = undefined
-    this.professionMenuButtons = []
-    this.professionMenuLabels = []
-    this.setCombatTimeScale(1)
   }
 
   private updateCameraFocus(delta: number, movementDirection: number): void {
@@ -890,13 +1226,36 @@ class PrototypeScene extends Phaser.Scene {
       })
     }
     const camera = this.cameras.main
-    const desiredScrollX = Phaser.Math.Clamp(
-      this.player.x + this.cameraFocus.offset - camera.width / 2,
-      0, WORLD_WIDTH - camera.width,
-    )
-    const blend = 1 - Math.exp(-CAMERA_TRACKING_SMOOTHING * delta / 1000)
+    const isZoomed = this.isRouletteOpen || this.isTransforming
+
+    // Smooth zoom interpolation
+    const zoomBlend = 1 - Math.exp(-12.0 * delta / 1000)
+    camera.zoom = Phaser.Math.Linear(camera.zoom, this.cameraTargetZoom, zoomBlend)
+
+    let desiredScrollX: number
+    let desiredScrollY: number
+
+    if (isZoomed) {
+      desiredScrollX = this.player.x - camera.width / 2
+      desiredScrollY = this.player.y - 45 - camera.height / 2
+    } else {
+      desiredScrollX = Phaser.Math.Clamp(
+        this.player.x + this.cameraFocus.offset - camera.width / 2,
+        0, WORLD_WIDTH - camera.width,
+      )
+      desiredScrollY = 0
+    }
+
+    const blend = 1 - Math.exp(-8.0 * delta / 1000)
     camera.scrollX = Phaser.Math.Linear(camera.scrollX, desiredScrollX, blend)
-    camera.scrollY = 0
+    camera.scrollY = Phaser.Math.Linear(camera.scrollY, desiredScrollY, blend)
+
+    // Counteract zoom on uiContainer so HUD and touch buttons remain 1:1 on screen
+    if (this.uiContainer) {
+      const z = camera.zoom
+      this.uiContainer.setScale(1 / z)
+      this.uiContainer.setPosition(480 * (1 - 1 / z), 270 * (1 - 1 / z))
+    }
   }
 
   private playAction(action: keyof typeof avatarActions): void {
@@ -1464,12 +1823,13 @@ class PrototypeScene extends Phaser.Scene {
   private updateHealthDisplay(): void {
     this.playerBar.setName(professionNames[this.profession])
     this.playerBar.update(this.player.x, this.player.y - 79, this.playerHp)
+    this.playerBar.setVisible(!this.isRouletteOpen)
     this.tankGuardBar.update(this.player.x, this.player.y - 70, Math.ceil(this.tankGuard))
-    this.tankGuardBar.setVisible(this.profession === 'tank')
+    this.tankGuardBar.setVisible(this.profession === 'tank' && !this.isRouletteOpen)
     this.ammoSlots.update(this.player.x, this.player.y - 70, this.playerAmmo, this.reloading)
-    this.ammoSlots.setVisible(this.profession === 'gunner')
+    this.ammoSlots.setVisible(this.profession === 'gunner' && !this.isRouletteOpen)
     this.healerManaBar.update(this.player.x, this.player.y - 70, Math.ceil(this.healerMana))
-    this.healerManaBar.setVisible(this.profession === 'healer')
+    this.healerManaBar.setVisible(this.profession === 'healer' && !this.isRouletteOpen)
     this.busBar.update(this.bus.x, this.bus.y - this.bus.displayHeight - 17, this.busHp)
     const melee = this.enemies.filter(enemy => enemy.hp > 0 && enemy.kind === 'melee').length
     const ranged = this.enemies.filter(enemy => enemy.hp > 0 && enemy.kind === 'ranged').length
@@ -1580,17 +1940,9 @@ class PrototypeScene extends Phaser.Scene {
       this.scene.restart()
       return
     }
-    if (!this.gameEnded && Phaser.Input.Keyboard.JustDown(this.keys.Q)) this.toggleProfessionMenu()
-    const controlsLocked = this.professionMenuOpen
-    if (controlsLocked) {
-      const selectUp = Phaser.Input.Keyboard.JustDown(this.cursors.up)
-        || Phaser.Input.Keyboard.JustDown(this.keys.W)
-      const selectDown = Phaser.Input.Keyboard.JustDown(this.cursors.down)
-        || Phaser.Input.Keyboard.JustDown(this.keys.S)
-      if (selectUp) this.moveProfessionMenuSelection(-1)
-      if (selectDown) this.moveProfessionMenuSelection(1)
-      if (Phaser.Input.Keyboard.JustDown(this.cursors.space)
-        || Phaser.Input.Keyboard.JustDown(this.enterKey)) this.selectProfessionBySelection()
+    const controlsLocked = this.isRouletteOpen || this.isTransforming
+    if (this.isRouletteOpen && this.rouletteContainer) {
+      this.rouletteContainer.setPosition(this.player.x, this.player.y - 75)
     }
     this.updateBlocking(gameplayDelta)
     this.updateHealingChannel(gameplayDelta, time)
@@ -1622,12 +1974,14 @@ class PrototypeScene extends Phaser.Scene {
     const right = !controlsLocked && !channelLocked
       && (this.cursors.right.isDown || this.keys.D.isDown || this.touchControlIsDown('right'))
     const direction = Number(right) - Number(left)
-    if (!this.hurt) {
+    if (!this.hurt && !controlsLocked) {
       this.player.setVelocityX(direction * SPEED)
       if (direction) this.player.setFlipX(direction < 0)
+    } else if (controlsLocked) {
+      this.player.setVelocityX(0)
     }
     this.updateSoulAbsorption(time)
-    this.updateCameraFocus(gameplayDelta, direction)
+    this.updateCameraFocus(delta, direction)
     if (!controlsLocked && !channelLocked && !this.hurt && grounded && this.player.y < GROUND_Y - 8
       && Phaser.Input.Keyboard.JustDown(this.cursors.down)) {
       this.dropThroughUntil = time + DROP_THROUGH_MS
@@ -1655,7 +2009,7 @@ class PrototypeScene extends Phaser.Scene {
       this.jumpReleased = true
     }
     // Shooting owns the animation temporarily, while movement physics continue.
-    if (!this.firing && !this.reloading && !this.hurt && !channelLocked) {
+    if (!this.firing && !this.reloading && !this.hurt && !channelLocked && !this.isTransforming) {
       if (body.velocity.y < -80) this.playAction('JumpRise')
       else if (!grounded && body.velocity.y > 80) this.playAction('JumpFall')
       else if (!grounded) this.playAction('JumpMid')
