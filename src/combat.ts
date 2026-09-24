@@ -24,7 +24,7 @@ export const combatConfig = {
   projectileFlightTimeVariation: 0.2,
   waveInterval: 15000,
   boss: {
-    health: 25000,
+    health: 10000,
     scale: 4.8,
     patrolRadius: 180,
     patrolSpeed: 45,
@@ -372,8 +372,12 @@ export class Boss implements HostileTarget {
     if (!this.awakened && Math.abs(playerCenterX - this.sprite.x) <= combatConfig.boss.detectionRange) {
       this.awakened = true
     }
-    if (this.awakened) {
-      this.sprite.setVelocityX(-combatConfig.boss.moveSpeed)
+    const allyInBasicRange = this.hasBasicAllyInRange(allies)
+    if (this.awakened || allyInBasicRange) {
+      // A friendly unit in normal ranged range pins the boss in place, so its
+      // basic attack can continuously fire without advancing between shots.
+      // This also takes precedence over the pre-awakening patrol state.
+      this.sprite.setVelocityX(allyInBasicRange ? 0 : -combatConfig.boss.moveSpeed)
     } else {
       if (this.sprite.x <= this.patrolCenter - combatConfig.boss.patrolRadius) this.patrolDirection = 1
       if (this.sprite.x >= this.patrolCenter + combatConfig.boss.patrolRadius) this.patrolDirection = -1
@@ -417,9 +421,10 @@ export class Boss implements HostileTarget {
       })
       this.attackPhase = 'idle'
       this.nextAttackAt = time + combatConfig.boss.attackCooldown / this.currentAttackMultiplier()
-      this.nextBasicAttackAt = Math.max(this.nextBasicAttackAt, time + 500)
+      this.nextBasicAttackAt = time
       this.lockCommittedToPlayer = false
       this.warning.setVisible(false)
+      this.sprite.setVelocityX(0)
     }
     if (this.attackPhase !== 'idle') this.sprite.setVelocityX(0)
     if (this.attackPhase === 'idle' && time < this.nextAttackAt && time >= this.nextBasicAttackAt) {
@@ -464,15 +469,21 @@ export class Boss implements HostileTarget {
     const body = this.sprite.body as Phaser.Physics.Arcade.Body
     const ally = allies
       .filter(target => target.hp > 0 && target.sprite.active
-        && canShootFromLeft(body, target.sprite.body as Phaser.Physics.Arcade.Body))
+        && canShootFromLeft(body, target.sprite.body as Phaser.Physics.Arcade.Body, combatConfig.rangedRange))
       .sort((a, b) => b.sprite.x - a.sprite.x)[0]
     if (ally) return {
       bounds: ally.sprite.body as Phaser.Physics.Arcade.Body,
       isAlive: () => ally.hp > 0 && ally.sprite.active,
     }
-    if (canShootFromLeft(body, player)) return { bounds: player, isAlive: () => true }
-    if (canShootFromLeft(body, bus)) return { bounds: bus, isAlive: () => true }
+    if (canShootFromLeft(body, player, combatConfig.rangedRange)) return { bounds: player, isAlive: () => true }
+    if (canShootFromLeft(body, bus, combatConfig.rangedRange)) return { bounds: bus, isAlive: () => true }
     return null
+  }
+
+  private hasBasicAllyInRange(allies: FriendlyTarget[]): boolean {
+    const body = this.sprite.body as Phaser.Physics.Arcade.Body
+    return allies.some(ally => ally.hp > 0 && ally.sprite.active
+      && canShootFromLeft(body, ally.sprite.body as Phaser.Physics.Arcade.Body, combatConfig.rangedRange))
   }
 
   private closestTarget(player: Bounds, allies: FriendlyTarget[]): Bounds | null {
