@@ -15,6 +15,10 @@ const COYOTE_MS = 100
 const JUMP_BUFFER_MS = 120
 const DROP_THROUGH_MS = 300
 const DROP_THROUGH_SPEED = 120
+// Four ground steps (roughly 32px each) is close enough for a soul to seek the player.
+const SOUL_ATTRACTION_RANGE = 128
+const SOUL_ATTRACTION_SPEED = 620
+const SOUL_PICKUP_DISTANCE = 24
 const BULLET_SPEED = 760
 const BULLET_LIFETIME_MS = 1400
 const HEAL_RANGE = 320
@@ -87,7 +91,6 @@ class PrototypeScene extends Phaser.Scene {
   private oneWayPlatforms!: Phaser.Physics.Arcade.StaticGroup
   private wave = 0
   private nextWaveAt: number | null = null
-  private wavePausedAt: number | null = null
   private pendingEnemyReinforcements: EnemyKind[] = []
   private enemySpawnCenter = combatConfig.waveCluster.enemyCenter
   private allyBanner!: Phaser.GameObjects.Container
@@ -161,7 +164,6 @@ class PrototypeScene extends Phaser.Scene {
     this.enemies = []
     this.wave = 0
     this.nextWaveAt = null
-    this.wavePausedAt = null
     this.pendingEnemyReinforcements = []
     this.enemySpawnCenter = combatConfig.waveCluster.enemyCenter
     this.bannerHeld = false
@@ -771,7 +773,9 @@ class PrototypeScene extends Phaser.Scene {
     for (const { kind, x, combatAdvance } of this.createWaveCluster(this.enemySpawnCenter, reinforcements)) {
       this.spawnEnemy(kind, x, combatAdvance)
     }
-    this.releasePendingAllies()
+    // Carrying the banner deliberately holds recovered allies, but must not
+    // delay the scheduled enemy wave that has just spawned.
+    if (!this.bannerHeld) this.releasePendingAllies()
   }
 
   private createWaveCluster(centerX: number, reinforcements: EnemyKind[] = []): { kind: EnemyKind; x: number; combatAdvance: number }[] {
@@ -860,13 +864,9 @@ class PrototypeScene extends Phaser.Scene {
       if (this.bannerHeld && standingOnGround) {
         this.bannerHeld = false
         this.allyBanner.setPosition(Phaser.Math.Clamp(this.player.x, 40, WORLD_WIDTH - 40), GROUND_Y)
-        if (this.wavePausedAt !== null && this.nextWaveAt !== null) {
-          this.nextWaveAt += this.time.now - this.wavePausedAt
-        }
-        this.wavePausedAt = null
+        this.releasePendingAllies()
       } else if (!this.bannerHeld && nearby) {
         this.bannerHeld = true
-        this.wavePausedAt = this.time.now
       }
     }
     const prompt = this.bannerHeld
@@ -913,6 +913,31 @@ class PrototypeScene extends Phaser.Scene {
       return
     }
     this.pendingEnemyReinforcements.push(soul.kind)
+  }
+
+  private updateSoulAttraction(delta: number): void {
+    const targetX = this.player.x
+    // Aim at the player's pickup hitbox near their feet, rather than the
+    // sprite centre, so attracted souls do not appear to float into the air.
+    const targetY = this.player.y - 10
+    const maxDistance = SOUL_ATTRACTION_SPEED * delta / 1000
+
+    for (const soul of [...this.souls]) {
+      if (soul.collected || !soul.marker.active) continue
+
+      const distance = Phaser.Math.Distance.Between(soul.marker.x, soul.marker.y, targetX, targetY)
+      if (distance > SOUL_ATTRACTION_RANGE) continue
+      if (distance <= SOUL_PICKUP_DISTANCE) {
+        this.collectSoul(soul, 'player')
+        continue
+      }
+
+      const travel = Math.min(maxDistance, distance - SOUL_PICKUP_DISTANCE)
+      soul.marker.x += (targetX - soul.marker.x) / distance * travel
+      soul.marker.y += (targetY - soul.marker.y) / distance * travel
+      soul.caption.setPosition(soul.marker.x, soul.marker.y - 29)
+      ;(soul.marker.body as Phaser.Physics.Arcade.Body).updateFromGameObject()
+    }
   }
 
   private onPointerDown(pointer: Phaser.Input.Pointer): void {
@@ -1457,6 +1482,7 @@ class PrototypeScene extends Phaser.Scene {
       this.player.setVelocityX(direction * SPEED)
       if (direction) this.player.setFlipX(direction < 0)
     }
+    this.updateSoulAttraction(gameplayDelta)
     this.updateCameraFocus(gameplayDelta, direction)
     if (!controlsLocked && !this.blocking && !this.hurt && grounded && this.player.y < GROUND_Y - 8
       && Phaser.Input.Keyboard.JustDown(this.cursors.down)) {
@@ -1564,10 +1590,12 @@ class PrototypeScene extends Phaser.Scene {
     if (this.nextWaveAt !== null) {
       const allyMelee = this.allies.filter(ally => ally.hp > 0 && ally.kind === 'melee').length
       const allyRanged = this.allies.filter(ally => ally.hp > 0 && ally.kind === 'ranged').length
+      if (time >= this.nextWaveAt) this.spawnWave()
       if (this.bannerHeld) {
-        this.stateText.setText(`旗幟攜帶中 · 波次暫停 · 友軍排隊 ${this.pendingAllySpawns.length}`)
+        const seconds = Math.max(0, Math.ceil((this.nextWaveAt - time) / 1000))
+        const queued = this.pendingEnemyReinforcements.length
+        this.stateText.setText(`旗幟攜帶中 · 友軍排隊 ${this.pendingAllySpawns.length} · 敵軍下一波 ${seconds} 秒${queued ? ` · 敵援 +${queued}` : ''}`)
       } else {
-        if (time >= this.nextWaveAt) this.spawnWave()
         const seconds = Math.max(0, Math.ceil((this.nextWaveAt - time) / 1000))
         const queued = this.pendingEnemyReinforcements.length
         this.stateText.setText(`第 ${this.wave} 波 · 友軍 ${allyMelee}/${allyRanged} · 下一波 ${seconds} 秒${queued ? ` · 敵援 +${queued}` : ''}`)
