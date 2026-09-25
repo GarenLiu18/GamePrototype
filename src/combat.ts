@@ -129,18 +129,19 @@ export class HealthBar {
     color: number,
     nameColor = '#e5efff',
     private showLabel = true,
+    baseDepth = 20,
   ) {
     this.nameColor = nameColor
-    this.background = scene.add.rectangle(0, 0, width + 4, 8, 0x09111e).setDepth(20)
-    this.fill = scene.add.rectangle(0, 0, width, 4, color).setOrigin(0, 0.5).setDepth(21)
+    this.background = scene.add.rectangle(0, 0, width + 4, 8, 0x09111e).setDepth(baseDepth)
+    this.fill = scene.add.rectangle(0, 0, width, 4, color).setOrigin(0, 0.5).setDepth(baseDepth + 1)
     if (this.showLabel) {
-      this.labelBg = scene.add.rectangle(0, 0, 0, 15, 0x09111e).setOrigin(0.5, 1).setDepth(21)
+      this.labelBg = scene.add.rectangle(0, 0, 0, 15, 0x09111e).setOrigin(0.5, 1).setDepth(baseDepth + 1)
       this.nameLabel = scene.add.text(0, 0, '', {
         fontFamily: '"Segoe UI", "Microsoft JhengHei", sans-serif', fontSize: '11px', color: this.nameColor,
-      }).setOrigin(0, 1).setDepth(22)
+      }).setOrigin(0, 1).setDepth(baseDepth + 2)
       this.valueLabel = scene.add.text(0, 0, '', {
         fontFamily: '"Segoe UI", "Microsoft JhengHei", sans-serif', fontSize: '11px', color: '#e5efff',
-      }).setOrigin(0, 1).setDepth(22)
+      }).setOrigin(0, 1).setDepth(baseDepth + 2)
     }
   }
   setName(name: string): void {
@@ -190,12 +191,13 @@ export class AmmoSlots {
     private activeColor = 0xa0e6da,
     private reloadColor = 0xffc477,
     private emptyColor = 0x162232,
+    baseDepth = 20,
   ) {
     const gap = 3
     const slotWidth = (totalWidth - (slotCount - 1) * gap) / slotCount
     for (let i = 0; i < slotCount; i++) {
-      const bg = scene.add.rectangle(0, 0, slotWidth, 8, 0x09111e).setDepth(20)
-      const fill = scene.add.rectangle(0, 0, slotWidth - 2, 4, activeColor).setDepth(21)
+      const bg = scene.add.rectangle(0, 0, slotWidth, 8, 0x09111e).setDepth(baseDepth)
+      const fill = scene.add.rectangle(0, 0, slotWidth - 2, 4, activeColor).setDepth(baseDepth + 1)
       this.backgrounds.push(bg)
       this.fills.push(fill)
     }
@@ -420,7 +422,7 @@ export class Boss implements HostileTarget {
     this.bar = new HealthBar(scene, 140, this.hp, 'BOSS', 0xff405f)
     this.bar.setVisible(false)
     this.warning = scene.add.ellipse(0, 0, 82, 30, 0xff1f3d, 0.16)
-      .setStrokeStyle(3, 0xff405f, 0.95).setDepth(8).setVisible(false)
+      .setStrokeStyle(3, 0xff405f, 0.95).setDepth(12).setVisible(false)
     this.sprite.play(enemyActions.PowerUp.key)
   }
 

@@ -34,6 +34,10 @@ const CAMERA_FORWARD_FOCUS = 170
 const CAMERA_FOCUS_TRANSITION_DURATION = 700
 const CAMERA_TRACKING_SMOOTHING = 2.4
 const fontFamily = '"Segoe UI", "Microsoft JhengHei", sans-serif'
+const PLAYER_DEPTH = 10
+const TANK_PUSH_DISTANCE = 64
+const TANK_PUSH_DURATION = 380
+const TANK_PUSH_SPEED = 180
 
 type Soul = {
   marker: Phaser.GameObjects.Rectangle
@@ -110,6 +114,9 @@ class PrototypeScene extends Phaser.Scene {
   private busHp = combatConfig.busHealth
   private playerBar!: HealthBar
   private tankGuardBar!: HealthBar
+  private tankShield!: Phaser.GameObjects.Container
+  private tankBlockFlashStartedAt = 0
+  private tankBlockFlashUntil = 0
   private ammoSlots!: AmmoSlots
   private healerManaBar!: HealthBar
   private healerMana = HEALER_MANA_MAX
@@ -142,6 +149,11 @@ class PrototypeScene extends Phaser.Scene {
   private playerAmmo = 3
   private profession: Profession = 'gunner'
   private blocking = false
+  private tankPushing = false
+  private tankPushStartX = 0
+  private tankPushDirection = 1
+  private tankPushStartedAt = 0
+  private guardInputPreviouslyHeld = false
   private tankGuard = TANK_GUARD_MAX
   private deployingBanner = false
   private playerUsingStrugglePose = false
@@ -282,7 +294,7 @@ class PrototypeScene extends Phaser.Scene {
     ]) addPlatform(this.oneWayPlatforms, x, y - 30, width, 28)
     this.createLandmarks()
     this.player = this.physics.add.sprite(START_X, GROUND_Y, avatarActions.Idle.frames[0])
-      .setOrigin(0.5, 1).setScale(1.6).setDepth(5).setCollideWorldBounds(true)
+      .setOrigin(0.5, 1).setScale(1.6).setDepth(PLAYER_DEPTH).setCollideWorldBounds(true)
     // Inspected frames are 96 x 84 with transparent padding above the character.
     this.player.setSize(16, 38).setOffset(40, 46)
     this.player.setMaxVelocity(SPEED, 900)
@@ -299,12 +311,19 @@ class PrototypeScene extends Phaser.Scene {
     this.bus = this.add.image(180, GROUND_Y, busTexture, 'vehicle').setOrigin(0.5, 1).setScale(2).setDepth(2)
     this.physics.add.existing(this.bus, true)
     this.createAllyBanner()
-    this.playerBar = new HealthBar(this, 54, combatConfig.playerHealth, professionNames[this.profession], 0xa0e6da, '#ff4d6d')
-    this.tankGuardBar = new HealthBar(this, 54, TANK_GUARD_MAX, '', 0x7cb7ff, undefined, false)
+    const shieldGlow = this.add.rectangle(0, 0, 20, 52, 0x7cb7ff, 0.25)
+    const shieldPlate = this.add.rectangle(0, 0, 14, 48, 0x4a9eff, 0.9)
+      .setStrokeStyle(2, 0xd8edff, 1)
+    const shieldCore = this.add.rectangle(0, 0, 4, 32, 0xffffff, 0.95)
+    this.tankShield = this.add.container(0, 0, [shieldGlow, shieldPlate, shieldCore])
+      .setDepth(PLAYER_DEPTH + 1)
+      .setVisible(false)
+    this.playerBar = new HealthBar(this, 54, combatConfig.playerHealth, professionNames[this.profession], 0xa0e6da, '#ff4d6d', true, 23)
+    this.tankGuardBar = new HealthBar(this, 54, TANK_GUARD_MAX, '', 0x7cb7ff, undefined, false, 23)
     this.tankGuardBar.setVisible(false)
-    this.ammoSlots = new AmmoSlots(this, 54, 3)
+    this.ammoSlots = new AmmoSlots(this, 54, 3, 0xa0e6da, 0xffc477, 0x162232, 23)
     this.ammoSlots.setVisible(this.profession === 'gunner')
-    this.healerManaBar = new HealthBar(this, 54, HEALER_MANA_MAX, '', 0x72e7c6, undefined, false)
+    this.healerManaBar = new HealthBar(this, 54, HEALER_MANA_MAX, '', 0x72e7c6, undefined, false, 23)
     this.healerManaBar.setVisible(false)
     this.healBeam = this.add.graphics().setDepth(15)
     this.busBar = new HealthBar(this, 180, combatConfig.busHealth, '守護巴士', 0x7cb7ff)
@@ -319,7 +338,13 @@ class PrototypeScene extends Phaser.Scene {
     // behind. This does not change the enemy's forward-only attack targeting.
     this.physics.add.overlap(this.player, this.enemyGroup, (_player, target) => {
       const hostile = (target as Phaser.Physics.Arcade.Sprite).getData('enemy') as HostileTarget
-      if (hostile.hp > 0) this.takeDamage('player', hostile.sprite.x,
+      if (hostile.hp <= 0) return
+      const targetSprite = target as Phaser.Physics.Arcade.Sprite
+      const now = this.time.now
+      const lastContact = targetSprite.getData('lastContactHitAt') ?? 0
+      if (now - lastContact < 400) return
+      targetSprite.setData('lastContactHitAt', now)
+      this.takeDamage('player', hostile.sprite.x,
         hostile instanceof Enemy ? hostile.attackDamage : undefined,
         hostile instanceof Enemy ? hostile.progression : undefined)
     })
@@ -707,19 +732,99 @@ class PrototypeScene extends Phaser.Scene {
     return [...this.touchControlPointers.values()].includes(control)
   }
 
-  private updateBlocking(delta: number): void {
+  private updateBlocking(delta: number, time: number): void {
     const guardInputHeld = this.tankGuardInputHeld()
-    this.blocking = this.profession === 'tank' && !this.professionMenuOpen && !this.hurt
-      && guardInputHeld
+    const canBlock = this.profession === 'tank' && !this.professionMenuOpen && !this.hurt
+      && this.tankGuard > 0
+
+    // Trigger push phase on new guard press
+    if (canBlock && guardInputHeld && !this.guardInputPreviouslyHeld && !this.tankPushing) {
+      this.tankPushing = true
+      this.tankPushStartedAt = time
+      this.tankPushStartX = this.player.x
+      this.tankPushDirection = this.player.flipX ? -1 : 1
+      this.blocking = true
+    }
+    this.guardInputPreviouslyHeld = guardInputHeld
+
+    // While pushing forward
+    if (this.tankPushing) {
+      if (!canBlock) {
+        this.tankPushing = false
+        this.blocking = false
+        this.tankShield?.setVisible(false)
+        return
+      }
+
+      const distance = Math.abs(this.player.x - this.tankPushStartX)
+      const elapsed = time - this.tankPushStartedAt
+      if (elapsed >= TANK_PUSH_DURATION || distance >= TANK_PUSH_DISTANCE) {
+        this.tankPushing = false
+        if (guardInputHeld) {
+          this.blocking = true
+          this.player.setVelocityX(0)
+          this.playAction('PushIdle')
+        } else {
+          this.blocking = false
+          this.player.setVelocityX(0)
+          this.tankShield?.setVisible(false)
+          return
+        }
+      } else {
+        this.blocking = true
+        this.playAction('Push')
+        this.pushEnemiesAway(this.tankPushDirection)
+      }
+
+      const facingRight = this.tankPushDirection > 0
+      this.player.setFlipX(!facingRight)
+      this.tankShield.setPosition(this.player.x + (facingRight ? 20 : -20), this.player.y - 32)
+      this.tankShield.setVisible(true)
+      return
+    }
+
+    // Steady blocking phase (push completed, guard still held)
+    this.blocking = canBlock && guardInputHeld
     if (!this.blocking) {
+      this.tankShield?.setVisible(false)
       if (this.profession === 'tank' && !guardInputHeld) {
         this.tankGuard = Math.min(TANK_GUARD_MAX,
           this.tankGuard + TANK_GUARD_RECOVERY_PER_SECOND * delta / 1000)
       }
       return
     }
+
     this.player.setVelocityX(0)
+    const leftHeld = this.cursors.left.isDown || this.keys.A.isDown || this.touchControlIsDown('left')
+    const rightHeld = this.cursors.right.isDown || this.keys.D.isDown || this.touchControlIsDown('right')
+    if (leftHeld && !rightHeld) {
+      this.player.setFlipX(true)
+    } else if (rightHeld && !leftHeld) {
+      this.player.setFlipX(false)
+    }
     this.playAction('PushIdle')
+    const facingRight = !this.player.flipX
+    this.tankShield.setPosition(this.player.x + (facingRight ? 20 : -20), this.player.y - 32)
+    this.tankShield.setVisible(true)
+  }
+
+  private pushEnemiesAway(direction: number): void {
+    const pushReach = 48
+    const minPushX = direction > 0 ? this.player.x - 12 : this.player.x - pushReach
+    const maxPushX = direction > 0 ? this.player.x + pushReach : this.player.x + 12
+    for (const enemy of this.enemies) {
+      if (enemy.hp <= 0 || !enemy.sprite.active) continue
+      const enemyX = enemy.sprite.x
+      const enemyY = enemy.sprite.y
+      if (Math.abs(enemyY - this.player.y) > 40) continue
+      if (enemyX >= minPushX && enemyX <= maxPushX) {
+        const pushedX = direction > 0
+          ? Math.max(enemy.sprite.x, this.player.x + 38)
+          : Math.min(enemy.sprite.x, this.player.x - 38)
+        enemy.sprite.setX(pushedX)
+        enemy.sprite.setVelocityX(direction * 150)
+      }
+    }
   }
 
   private attackInputHeld(): boolean {
@@ -856,6 +961,8 @@ class PrototypeScene extends Phaser.Scene {
     this.firing = false
     this.reloading = false
     this.blocking = false
+    this.tankShield?.setVisible(false)
+    this.tankPushing = false
     this.channelingHeal = false
     this.healTarget = null
     this.healBeam?.clear()
@@ -1206,6 +1313,8 @@ class PrototypeScene extends Phaser.Scene {
   private selectProfession(profession: Profession): void {
     this.profession = profession
     this.blocking = false
+    this.tankShield?.setVisible(false)
+    this.tankPushing = false
     if (profession !== 'gunner') this.reloading = false
     if (profession !== 'healer') {
       this.channelingHeal = false
@@ -1517,7 +1626,7 @@ class PrototypeScene extends Phaser.Scene {
       Phaser.Physics.Arcade.Sprite | null
     if (!bullet) return false
     bullet.setTexture(bulletAction.frames[0], 'projectile')
-      .setOrigin(0.5).setScale(2).setDepth(6).setFlipX(direction < 0)
+      .setOrigin(0.5).setScale(2).setDepth(11).setFlipX(direction < 0)
     bullet.enableBody(true, x, y, true, true)
     bullet.setSize(9, 2).setOffset(0, 0)
     const bulletBody = bullet.body as Phaser.Physics.Arcade.Body
@@ -1543,7 +1652,7 @@ class PrototypeScene extends Phaser.Scene {
       Phaser.Physics.Arcade.Sprite | null
     if (!shot) return
     shot.setTexture(enemyProjectileAction.frames[0], 'projectile').setOrigin(0.5)
-      .setScale(1.4).setDepth(7).setFlipX(false).setAlpha(1)
+      .setScale(1.4).setDepth(11).setFlipX(false).setAlpha(1)
     shot.enableBody(true, x, y, true, true)
     shot.setSize(12, 8).setOffset(13.5, -0.5)
     const body = shot.body as Phaser.Physics.Arcade.Body
@@ -1567,7 +1676,7 @@ class PrototypeScene extends Phaser.Scene {
       Phaser.Physics.Arcade.Sprite | null
     if (!arrow) return
     arrow.setTexture(allyArrowTexture, 'projectile').setOrigin(0.5)
-      .setScale(combatConfig.boss.arrowScale).setDepth(9)
+      .setScale(combatConfig.boss.arrowScale).setDepth(12)
       .setFlipX(false).setAlpha(0.95).setTint(0xff405f)
     arrow.enableBody(true, x, y, true, true)
     arrow.setSize(23, 5).setOffset(0, 0)
@@ -1608,7 +1717,7 @@ class PrototypeScene extends Phaser.Scene {
         Phaser.Physics.Arcade.Sprite | null
       if (!arrow) continue
       arrow.setTexture(allyArrowTexture, 'projectile').setOrigin(0.5)
-        .setScale(combatConfig.boss.arrowScale).setDepth(9)
+        .setScale(combatConfig.boss.arrowScale).setDepth(12)
         .setFlipX(false).setAlpha(0.95).setTint(0xff405f)
       arrow.enableBody(true, x, y, true, true)
       arrow.setSize(23, 5).setOffset(0, 0).setRotation(angle)
@@ -1742,8 +1851,12 @@ class PrototypeScene extends Phaser.Scene {
     if (target === 'player') {
       this.cancelSoulAbsorption(true)
       if (this.blocking && this.absorbTankGuard(amount)) {
+        this.triggerTankBlockFeedback(sourceX)
         return
       }
+      this.tankShield?.setVisible(false)
+      this.tankPushing = false
+      this.blocking = false
       if (this.time.now < this.invulnerableUntil) return
       this.playerHp = Math.max(0, this.playerHp - amount)
       if (this.playerHp === 0) credit?.recordKill()
@@ -1764,7 +1877,7 @@ class PrototypeScene extends Phaser.Scene {
       // No dedicated OnHit asset exists. A short procedural flash complements
       // the complete source Knockback animation without replacing any frames.
       const flash = this.add.circle(this.player.x, this.player.y - 36, 8, 0xffeee0, 0.8)
-        .setStrokeStyle(2, 0xffa4a6).setDepth(10)
+        .setStrokeStyle(2, 0xffa4a6).setDepth(12)
       this.tweens.add({ targets: flash, scale: 2.2, alpha: 0, duration: 160,
         onComplete: () => flash.destroy() })
     } else {
@@ -1788,10 +1901,40 @@ class PrototypeScene extends Phaser.Scene {
     return true
   }
 
+  private triggerTankBlockFeedback(_sourceX: number): void {
+    this.tankBlockFlashStartedAt = this.time.now
+    this.tankBlockFlashUntil = this.time.now + 240
+    this.player.setTintFill(0xffffff)
+    if (this.tankShield) {
+      this.tweens.killTweensOf(this.tankShield)
+      this.tankShield.setScale(1.3)
+      this.tweens.add({
+        targets: this.tankShield,
+        scaleX: 1,
+        scaleY: 1,
+        duration: 130,
+        ease: 'Quad.Out',
+      })
+      const spark = this.add.circle(this.tankShield.x, this.player.y - 32, 12, 0xd0e8ff, 0.95)
+        .setDepth(PLAYER_DEPTH + 2)
+      this.tweens.add({
+        targets: spark,
+        scale: 2.4,
+        alpha: 0,
+        duration: 150,
+        onComplete: () => spark.destroy(),
+      })
+    }
+  }
+
   private endEncounter(message: string): void {
     if (this.gameEnded) return
     this.gameEnded = true
     this.hurt = false
+    this.blocking = false
+    this.tankPushing = false
+    this.tankShield?.setVisible(false)
+    this.tankBlockFlashUntil = 0
     this.invulnerableUntil = 0
     this.player.setAlpha(1).clearTint()
     this.physics.pause()
@@ -1944,7 +2087,7 @@ class PrototypeScene extends Phaser.Scene {
     if (this.isRouletteOpen && this.rouletteContainer) {
       this.rouletteContainer.setPosition(this.player.x, this.player.y - 75)
     }
-    this.updateBlocking(gameplayDelta)
+    this.updateBlocking(gameplayDelta, time)
     this.updateHealingChannel(gameplayDelta, time)
     if (!this.gameEnded && !controlsLocked) this.updateAllyBanner()
     this.updateHealthDisplay()
@@ -1955,11 +2098,19 @@ class PrototypeScene extends Phaser.Scene {
     const invulnerable = time < this.invulnerableUntil
     const absorbFlashing = time < this.soulAbsorbFlashUntil
       && Math.floor((time - this.soulAbsorbFlashStartedAt) / 60) % 2 === 0
+    const blockFlashing = time < this.tankBlockFlashUntil
+      && Math.floor((time - this.tankBlockFlashStartedAt) / 60) % 2 === 0
     this.player.setAlpha(
-      (invulnerable && Math.floor((time - this.hitStartedAt) / combatConfig.playerBlinkInterval) % 2 === 1) || absorbFlashing
+      (invulnerable && Math.floor((time - this.hitStartedAt) / combatConfig.playerBlinkInterval) % 2 === 1)
+        || absorbFlashing || blockFlashing
         ? 0.25 : 1,
     )
-    if (!invulnerable || time - this.hitStartedAt >= 100) this.player.clearTint()
+    if (time < this.tankBlockFlashUntil) {
+      const tintPhase = Math.floor((time - this.tankBlockFlashStartedAt) / 60) % 2
+      this.player.setTintFill(tintPhase === 0 ? 0xffffff : 0x7cb7ff)
+    } else if (!invulnerable || time - this.hitStartedAt >= 100) {
+      this.player.clearTint()
+    }
     if (this.player.y > 590) {
       this.playerHp = 0
       this.endEncounter('玩家已倒下')
@@ -1975,7 +2126,11 @@ class PrototypeScene extends Phaser.Scene {
       && (this.cursors.right.isDown || this.keys.D.isDown || this.touchControlIsDown('right'))
     const direction = Number(right) - Number(left)
     if (!this.hurt && !controlsLocked) {
-      this.player.setVelocityX(direction * SPEED)
+      if (this.tankPushing) {
+        this.player.setVelocityX(this.tankPushDirection * TANK_PUSH_SPEED)
+      } else {
+        this.player.setVelocityX(direction * SPEED)
+      }
       if (direction) this.player.setFlipX(direction < 0)
     } else if (controlsLocked) {
       this.player.setVelocityX(0)
